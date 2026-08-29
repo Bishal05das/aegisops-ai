@@ -24,7 +24,10 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: "1.24"
+  # Must track a supported Go line. Security fixes land only in the two most
+  # recent majors, so an aged-out toolchain accumulates unpatched stdlib CVEs
+  # and the govulncheck job below fails the build — which is how 1.24 was caught.
+  GO_VERSION: "1.26"
 
 jobs:
   # ---------------------------------------------------------------------------

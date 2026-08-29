@@ -39,7 +39,7 @@ func addr(hostKey, hostDef, portKey, portDef string) string {
 // this proves the real servers produce responses the probes accept.
 func TestBackingServicesSpeakTheirProtocols(t *testing.T) {
 	checks := []preflight.Check{
-		preflight.NewGoRuntimeCheck("1.24", runtime.Version),
+		preflight.NewGoRuntimeCheck("1.26", runtime.Version),
 		preflight.NewPostgresCheck(addr("AEGIS_PG_HOST", "localhost", "AEGIS_PG_PORT", "5434")),
 		preflight.NewRedisCheck(addr("AEGIS_REDIS_HOST", "localhost", "AEGIS_REDIS_PORT", "6380"),
 			os.Getenv("AEGIS_REDIS_PASSWORD")),

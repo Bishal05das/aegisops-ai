@@ -4,7 +4,7 @@
 
 **An autonomous AI DevOps engineer that investigates incidents — and cannot touch your infrastructure without permission.**
 
-[![Go](https://img.shields.io/badge/Go-1.24-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![Go](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)](https://go.dev)
 [![Framework](https://img.shields.io/badge/framework-none%20(stdlib%20only)-2ea44f)](docs/adr/0001-raw-go-no-framework.md)
 [![LLM](https://img.shields.io/badge/LLM-local%20only-blueviolet)](docs/adr/0003-local-llm-only.md)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
@@ -85,7 +85,7 @@ no methods, no client and no credentials. If the model hallucinates
 
 | Layer | Choice | Rationale |
 |---|---|---|
-| Language | Go 1.24 | Concurrency, static binaries, strong stdlib |
+| Language | Go 1.26 | Concurrency, static binaries, strong stdlib |
 | HTTP | `net/http` — **no framework** | [ADR 0001](docs/adr/0001-raw-go-no-framework.md) |
 | Architecture | Hexagonal (ports & adapters) | [ADR 0002](docs/adr/0002-hexagonal-architecture.md) |
 | LLM | Ollama + `qwen2.5:7b` | [ADR 0003](docs/adr/0003-local-llm-only.md) |
@@ -105,11 +105,19 @@ no methods, no client and no credentials. If the model hallucinates
 
 | | Minimum | This machine |
 |---|---|---|
-| Go | 1.24 | ✅ 1.24.3 |
+| Go | **1.26** | ✅ 1.24.3 — auto-fetches the pinned 1.26.7 |
 | Docker + Compose v2 | 24 / 2.20 | ✅ 27.5.1 / 2.32.4 |
 | Ollama | 0.3 | ✅ 0.24.0 |
 | RAM | 8 GB (16 GB with the model resident) | ✅ 16 GB |
 | Disk | ~12 GB | ✅ |
+
+> **You do not need to install Go 1.26 by hand.** `go.mod` pins
+> `toolchain go1.26.7`, so any Go 1.21+ on your machine fetches it automatically
+> on first build. The floor is not arbitrary: Go backports security fixes only
+> to the two most recent majors, and CI's `govulncheck` job fails the build on an
+> aged-out toolchain — which is exactly how Go 1.24 was caught here, carrying
+> seven unpatched stdlib CVEs in `crypto/tls`, `crypto/x509`, `net/http`,
+> `net/url`, `net/textproto` and `encoding/asn1`.
 
 ### Quick start
 
@@ -130,7 +138,7 @@ Expected tail of `make dev-up`:
 ```
 AegisOps preflight
 ────────────────────────────────────────────────────────────────────────
-  PASS  go-runtime       0ms  go 1.24.3
+  PASS  go-runtime       0ms  go 1.26.7
   PASS  postgres         2ms  postgres backend responding (TLS not configured)
   PASS  redis            1ms  redis 7.4.11 responding
   PASS  rabbitmq         3ms  AMQP 0-9 broker responding (Connection.Start received)

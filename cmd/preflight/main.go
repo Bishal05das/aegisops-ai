@@ -36,10 +36,13 @@ import (
 )
 
 const (
-	exitOK      = 0
-	exitFailed  = 1
-	exitUsage   = 2
-	minimumGo   = "1.24"
+	exitOK     = 0
+	exitFailed = 1
+	exitUsage  = 2
+	// Kept in lockstep with go.mod. Older toolchains still compile this code,
+	// but carry unpatched stdlib CVEs in crypto/tls and net/http — unacceptable
+	// for a process that terminates TLS and parses attacker-supplied headers.
+	minimumGo   = "1.26"
 	overallWait = 60 * time.Second
 )
 
