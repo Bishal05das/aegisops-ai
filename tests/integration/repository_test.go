@@ -142,8 +142,16 @@ func TestMigrationsAreIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	if len(statuses) != 6 {
-		t.Fatalf("got %d migrations, want 6", len(statuses))
+	// Compared against the loaded set rather than a hardcoded count. The
+	// property under test is "every known migration is applied and unmodified",
+	// which does not depend on how many there are — a literal here would have to
+	// be edited by every phase that adds one, and would fail for a reason that
+	// has nothing to do with what this test checks.
+	if len(statuses) != len(loaded) {
+		t.Fatalf("Status reported %d migrations, but %d were loaded", len(statuses), len(loaded))
+	}
+	if len(statuses) == 0 {
+		t.Fatal("no migrations were loaded; the embedded filesystem is empty")
 	}
 	for _, s := range statuses {
 		if !s.Applied {

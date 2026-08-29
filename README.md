@@ -95,6 +95,7 @@ no methods, no client and no credentials. If the model hallucinates
 | Security model | Harness as boundary; JWT + RBAC | [ADR 0006](docs/adr/0006-harness-as-security-boundary.md) |
 | Error handling | Typed taxonomy, dual-audience | [ADR 0007](docs/adr/0007-error-taxonomy.md) |
 | Persistence | `database/sql` + pgx; hand-written migrations | [ADR 0008](docs/adr/0008-database-sql-with-pgx.md) |
+| Auth | Hand-written HS256 JWT, argon2id, rotating refresh | [ADR 0009](docs/adr/0009-authentication-and-rbac.md) |
 | Observability | `log/slog`, Prometheus, OpenTelemetry → Jaeger | — |
 | Dev / prod | Docker Compose / Kubernetes + Helm | — |
 
@@ -183,6 +184,25 @@ make verify        # full local gate: fmt + vet + lint + race tests + build + pr
 make dev-down      # stop the stack (keeps data)
 make dev-clean     # stop and DELETE all volumes (prompts for confirmation)
 ```
+
+### Authentication
+
+```bash
+# The API cannot bootstrap itself: every endpoint that creates a user needs an
+# admin, and there is no admin until one exists. Seeding one via migration would
+# put a password in version control, so it is a CLI command instead.
+go run ./cmd/aegisctl user create --email you@example.com --role admin
+
+curl -s -X POST localhost:8080/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"you@example.com","password":"..."}' | jq .
+
+curl -s localhost:8080/api/v1/auth/me -H "Authorization: Bearer $TOKEN" | jq .
+```
+
+Passwords are never accepted as a flag — an argument is visible in `ps` and in
+shell history. `aegisctl` reads them from the terminal with echo disabled, or
+from `AEGISCTL_PASSWORD` for automation.
 
 ### Database
 
@@ -381,8 +401,8 @@ in the log.
 | 1 | Architecture, repository, development environment | ✅ |
 | 2 | HTTP server, configuration, logging, error handling | ✅ |
 | 3 | PostgreSQL layer, migrations, repository pattern | ✅ |
-| 4 | Authentication (JWT) and RBAC | ⏳ next |
-| 5 | Agent orchestration engine | |
+| 4 | Authentication (JWT) and RBAC | ✅ |
+| 5 | Agent orchestration engine | ⏳ next |
 | 6 | Harness engine | |
 | 7 | Tool ecosystem | |
 | 8 | Local LLM integration | |

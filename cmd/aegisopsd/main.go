@@ -22,6 +22,7 @@ import (
 	"os/signal"
 	"runtime"
 	"syscall"
+	"time"
 
 	"github.com/bishal05das/aegisops-ai/internal/api"
 	"github.com/bishal05das/aegisops-ai/internal/api/handlers"
@@ -30,6 +31,11 @@ import (
 	"github.com/bishal05das/aegisops-ai/internal/database/migrate"
 	"github.com/bishal05das/aegisops-ai/internal/database/migrations"
 	"github.com/bishal05das/aegisops-ai/internal/preflight"
+	"github.com/bishal05das/aegisops-ai/internal/repository/postgres"
+	"github.com/bishal05das/aegisops-ai/internal/security/password"
+	"github.com/bishal05das/aegisops-ai/internal/security/ratelimit"
+	"github.com/bishal05das/aegisops-ai/internal/security/token"
+	"github.com/bishal05das/aegisops-ai/internal/services"
 	"github.com/bishal05das/aegisops-ai/internal/version"
 	"github.com/bishal05das/aegisops-ai/pkg/logger"
 )
@@ -128,6 +134,45 @@ func run(args []string) int {
 		return exitFailure
 	}
 
+	// ---- security -----------------------------------------------------------
+	signer, verifier, tokenErr := buildTokens(cfg)
+	if tokenErr != nil {
+		log.Error("token configuration is invalid", "error", tokenErr)
+		return exitConfigError
+	}
+
+	hasher := password.NewArgon2Hasher(password.Params{})
+
+	// Two limiters with very different budgets. Credential guessing is a
+	// different traffic shape from ordinary API use: a handful of attempts a
+	// minute is generous for a human and useless for a brute-force run, whereas
+	// the same budget applied to the whole API would break normal clients.
+	apiLimiter := ratelimit.New(ratelimit.Config{
+		Rate:  float64(cfg.Security.RateLimitRPS),
+		Burst: cfg.Security.RateLimitBurst,
+	})
+	loginLimiter := ratelimit.New(ratelimit.Config{
+		Rate:  loginAttemptsPerSecond,
+		Burst: loginAttemptBurst,
+		TTL:   loginLimiterTTL,
+	})
+
+	// ---- repositories and services ------------------------------------------
+	users := postgres.NewUserRepo(db)
+	sessions := postgres.NewSessionRepo(db)
+	audit := postgres.NewAuditRepo(db)
+	txm := postgres.NewTxManager(db)
+
+	authSvc := services.NewAuthService(services.AuthDeps{
+		Users: users, Sessions: sessions, Audit: audit, Tx: txm,
+		Hasher: hasher, Signer: signer, Verifier: verifier,
+		Config: services.AuthConfig{
+			AccessTTL:  cfg.Security.JWTAccessTTL,
+			RefreshTTL: cfg.Security.JWTRefreshTTL,
+		},
+		Logger: log,
+	})
+
 	health := handlers.NewHealth(
 		handlers.WithChecks(dependencyChecks(cfg, db, schemaVersion)...),
 	)
@@ -136,6 +181,12 @@ func run(args []string) int {
 		Config: cfg,
 		Logger: log,
 		Health: health,
+		Auth: handlers.NewAuth(authSvc,
+			handlers.WithLoginLimiter(loginLimiter),
+			handlers.WithMaxBodyBytes(cfg.HTTP.MaxBodyBytes),
+		),
+		TokenVerifier: verifier,
+		RateLimiter:   apiLimiter,
 	})
 
 	// ---- serve --------------------------------------------------------------
@@ -202,6 +253,36 @@ func applyMigrations(ctx context.Context, db *sql.DB, cfg *config.Config, log *s
 		return 0, fmt.Errorf("apply migrations: %w", err)
 	}
 	return expected, nil
+}
+
+// Login throttle. Deliberately tight and expressed as a slow refill with a
+// small burst: a legitimate user retries a handful of times over a minute, a
+// brute-force run wants thousands.
+const (
+	loginAttemptsPerSecond = 0.1 // one attempt per 10s sustained
+	loginAttemptBurst      = 5   // five in quick succession, then throttled
+	loginLimiterTTL        = 30 * time.Minute
+)
+
+// buildTokens constructs the signer and verifier from configuration.
+//
+// Both are built here rather than inside the service so a bad secret fails at
+// startup with a clear message, rather than on the first login attempt.
+func buildTokens(cfg *config.Config) (*token.Signer, *token.Verifier, error) {
+	tc := token.Config{
+		Secret:   cfg.Security.JWTSecret.Reveal(),
+		Issuer:   cfg.Security.JWTIssuer,
+		Audience: cfg.Security.JWTIssuer,
+	}
+	signer, err := token.NewSigner(tc)
+	if err != nil {
+		return nil, nil, err
+	}
+	verifier, err := token.NewVerifier(tc)
+	if err != nil {
+		return nil, nil, err
+	}
+	return signer, verifier, nil
 }
 
 // flags holds parsed command-line options.

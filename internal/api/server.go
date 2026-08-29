@@ -18,6 +18,7 @@ import (
 	"github.com/bishal05das/aegisops-ai/internal/api/middleware"
 	"github.com/bishal05das/aegisops-ai/internal/api/render"
 	"github.com/bishal05das/aegisops-ai/internal/config"
+	"github.com/bishal05das/aegisops-ai/internal/security/ratelimit"
 	"github.com/bishal05das/aegisops-ai/pkg/errs"
 	"github.com/bishal05das/aegisops-ai/pkg/httpx"
 )
@@ -37,6 +38,15 @@ type Deps struct {
 	Config *config.Config
 	Logger *slog.Logger
 	Health *handlers.Health
+
+	// Auth is nil until Phase 4 wiring is present; the auth routes are then
+	// simply not registered, so a partially-composed server still serves its
+	// health endpoints rather than panicking at startup.
+	Auth *handlers.Auth
+	// TokenVerifier gates authenticated routes.
+	TokenVerifier middleware.TokenVerifier
+	// RateLimiter throttles the API globally, keyed by principal.
+	RateLimiter *ratelimit.Limiter
 }
 
 // NewServer assembles the router, middleware stack and http.Server.
@@ -117,6 +127,14 @@ func (s *Server) buildRouter(deps Deps) *httpx.Router {
 		middleware.CORS(middleware.CORSOptions{AllowedOrigins: cfg.HTTP.CORSOrigins}),
 		middleware.Timeout(cfg.HTTP.RequestTimeout),
 		middleware.MaxBody(cfg.HTTP.MaxBodyBytes),
+		// Below Timeout so a throttled request is not also counted against the
+		// request budget, and applied to authenticated and anonymous traffic
+		// alike — it keys on the principal when there is one and on the client
+		// address otherwise.
+		middleware.RateLimit(middleware.RateLimitOptions{
+			Limiter:   deps.RateLimiter,
+			SkipPaths: map[string]bool{"/healthz": true, "/readyz": true},
+		}),
 	)
 
 	health := deps.Health
@@ -124,13 +142,33 @@ func (s *Server) buildRouter(deps Deps) *httpx.Router {
 		health = handlers.NewHealth()
 	}
 
-	// Kubernetes probe endpoints live outside /api so they are never versioned
-	// and never require authentication.
+	// Kubernetes probe endpoints live outside /api so they are never versioned,
+	// never require authentication and are never rate limited — a throttled
+	// readiness check reads to Kubernetes as an unhealthy pod, so the limiter
+	// would cause the outage it exists to prevent.
 	r.Get("/healthz", health.Live)
 	r.Get("/readyz", health.Ready)
 
 	v1 := r.Group("/api/v1")
 	v1.Get("/version", health.Version)
+
+	if deps.Auth != nil {
+		// Unauthenticated by necessity: login has no credential yet, and
+		// refresh exists precisely for when the access token has expired.
+		// Requiring auth on either would make them unreachable.
+		v1.Post("/auth/login", deps.Auth.Login)
+		v1.Post("/auth/refresh", deps.Auth.Refresh)
+
+		// Everything else sits behind authentication. RequireAuth is applied as
+		// route middleware rather than to a group, so adding a route without it
+		// is visible in the diff rather than silently inheriting a group's
+		// protection — or silently missing it.
+		if deps.TokenVerifier != nil {
+			authed := middleware.RequireAuth(deps.TokenVerifier)
+			v1.Post("/auth/logout", deps.Auth.Logout, authed)
+			v1.Get("/auth/me", deps.Auth.Me, authed)
+		}
+	}
 
 	// JSON for 404 and 405 rather than net/http's text defaults, so clients
 	// parse one error shape for every response the API can produce.
