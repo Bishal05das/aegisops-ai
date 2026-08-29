@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -126,11 +127,22 @@ func doUp(ctx context.Context, runner *migrate.Runner, log *slog.Logger) int {
 func doDown(ctx context.Context, runner *migrate.Runner, log *slog.Logger, args []string) int {
 	steps := 1
 	if len(args) > 0 {
-		n, err := fmt.Sscanf(args[0], "%d", &steps)
-		if n != 1 || err != nil {
-			fmt.Fprintf(os.Stderr, "migrate: down expects a step count, got %q\n", args[0])
+		// strconv.Atoi, not fmt.Sscanf("%d"): Sscanf stops at the first
+		// non-digit and reports success, so "2oops" would parse as 2 and
+		// silently roll back two migrations. On a destructive command, input
+		// that is not exactly an integer must be refused, not interpreted.
+		n, err := strconv.Atoi(args[0])
+		if err != nil {
+			_, _ = fmt.Fprintf(os.Stderr,
+				"migrate: down expects a whole number of steps, got %q\n", args[0])
 			return exitUsage
 		}
+		if n < 1 {
+			_, _ = fmt.Fprintf(os.Stderr,
+				"migrate: down expects a positive step count, got %d\n", n)
+			return exitUsage
+		}
+		steps = n
 	}
 	if err := runner.Down(ctx, steps); err != nil {
 		log.Error("rollback failed", "error", err)

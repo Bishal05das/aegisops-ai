@@ -113,6 +113,12 @@ type AgentRepository interface {
 	// Upsert registers an agent or updates it in place, keyed on name. The
 	// orchestrator calls this at startup so the roster is reconciled from code
 	// rather than requiring a seed migration to stay in step.
+	//
+	// It reconciles an agent's DEFINITION (kind, description, config) and
+	// deliberately leaves its OPERATIONAL STATE alone: an existing agent's
+	// `enabled` flag is never overwritten. Disabling an agent is how an operator
+	// stops the AI proposing actions, and a restart must not silently re-arm it.
+	// Use Update to change that flag.
 	Upsert(ctx context.Context, a *agent.Agent) error
 }
 

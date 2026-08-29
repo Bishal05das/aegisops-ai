@@ -809,6 +809,54 @@ func TestAgentUpsertPreservesIdentity(t *testing.T) {
 	}
 }
 
+// Upsert reconciles an agent's DEFINITION from code but must leave its
+// OPERATIONAL STATE alone.
+//
+// Disabling an agent is how an operator stops the AI proposing actions during an
+// incident it is handling badly. If startup reconciliation reset that flag, the
+// next deploy or crash-restart would silently re-arm an agent a human had
+// deliberately switched off — turning a safety control into one that lapses on
+// its own.
+func TestAgentUpsertDoesNotReEnableADisabledAgent(t *testing.T) {
+	db := openDB(t)
+	ctx := testCtx(t)
+	repo := postgres.NewAgentRepo(db)
+
+	name := "disabled-agent-" + shared.NewID().String()
+	registered := seedAgent(t, ctx, db, repo, name)
+
+	// An operator switches it off.
+	registered.Enabled = false
+	if err := repo.Update(ctx, registered); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+
+	// The orchestrator re-registers on the next startup, with Enabled defaulted
+	// to true by agent.New — exactly the situation that must not re-arm it.
+	fresh, err := agent.New(clock, name, agent.KindAction, "re-registered on startup")
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if !fresh.Enabled {
+		t.Fatal("the fixture is not exercising the risk: agent.New should default Enabled to true")
+	}
+	if err := repo.Upsert(ctx, fresh); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	got, err := repo.GetByName(ctx, name)
+	if err != nil {
+		t.Fatalf("get by name: %v", err)
+	}
+	if got.Enabled {
+		t.Error("startup reconciliation re-enabled an agent an operator had disabled")
+	}
+	// The definition must still have been reconciled.
+	if got.Description != "re-registered on startup" {
+		t.Errorf("description = %q, want the definition updated", got.Description)
+	}
+}
+
 // -----------------------------------------------------------------------------
 // Seeded harness rules
 // -----------------------------------------------------------------------------

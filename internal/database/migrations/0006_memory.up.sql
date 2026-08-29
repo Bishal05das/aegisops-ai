@@ -1,10 +1,12 @@
 -- 0006_memory: long-term semantic memory.
 --
--- Lives in the same database as the records it describes so that an incident and
--- the embedding of its postmortem commit in ONE transaction. A separate vector
--- store makes that two operations with no shared transaction, and a crash
--- between them leaves the system either remembering an incident it cannot
--- recall, or recalling one that does not exist.
+-- Lives in the same database as the records it describes, so that writing an
+-- incident and writing the embedding of its postmortem happen in ONE
+-- transaction.
+--
+-- With a separate vector store they would be two operations sharing no
+-- transaction, and a crash between them leaves the system either remembering an
+-- incident it cannot recall, or recalling one that does not exist.
 -- See docs/adr/0005-postgres-with-pgvector.md.
 
 CREATE EXTENSION IF NOT EXISTS vector;

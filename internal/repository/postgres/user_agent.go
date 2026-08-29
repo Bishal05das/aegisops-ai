@@ -323,8 +323,21 @@ func (r *AgentRepo) Update(ctx context.Context, a *agent.Agent) error {
 // A seed migration would drift the moment an agent's description changed, and
 // would need a new migration for every such edit.
 //
-// The row's own ID and created_at are preserved on conflict: rewriting them
-// would orphan every agent_task and tool_call that references this agent.
+// Three fields are deliberately NOT overwritten on conflict:
+//
+//   - **id** and **created_at** — rewriting them would orphan every agent_task
+//     and tool_call that references this agent.
+//
+//   - **enabled** — and this one is a safety property, not a convenience.
+//     Disabling an agent is how an operator stops the AI proposing actions
+//     during an incident it is handling badly. If startup reconciliation reset
+//     that flag, the next deploy or crash-restart would silently re-arm an
+//     agent a human had deliberately switched off — turning a safety control
+//     into something that lapses on its own. Enabling an agent is a decision
+//     that must be made explicitly, through Update, by someone who means it.
+//
+// So this reconciles an agent's *definition* from code, and leaves its
+// *operational state* to operators.
 func (r *AgentRepo) Upsert(ctx context.Context, a *agent.Agent) error {
 	const op = "postgres.AgentRepo.Upsert"
 
@@ -344,6 +357,8 @@ func (r *AgentRepo) Upsert(ctx context.Context, a *agent.Agent) error {
 			description = EXCLUDED.description,
 			config      = EXCLUDED.config,
 			updated_at  = EXCLUDED.updated_at
+			-- enabled is NOT reconciled: see the doc comment. Re-enabling an
+			-- agent an operator switched off is a safety regression.
 		RETURNING id, created_at`,
 		a.ID, a.Name, string(a.Kind), a.Description, a.Enabled, config, a.CreatedAt, a.UpdatedAt,
 	).Scan(&a.ID, &a.CreatedAt)
