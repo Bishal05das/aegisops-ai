@@ -94,6 +94,7 @@ no methods, no client and no credentials. If the model hallucinates
 | Working memory | Redis 7.4 | [ADR 0005](docs/adr/0005-postgres-with-pgvector.md) |
 | Security model | Harness as boundary; JWT + RBAC | [ADR 0006](docs/adr/0006-harness-as-security-boundary.md) |
 | Error handling | Typed taxonomy, dual-audience | [ADR 0007](docs/adr/0007-error-taxonomy.md) |
+| Persistence | `database/sql` + pgx; hand-written migrations | [ADR 0008](docs/adr/0008-database-sql-with-pgx.md) |
 | Observability | `log/slog`, Prometheus, OpenTelemetry → Jaeger | — |
 | Dev / prod | Docker Compose / Kubernetes + Helm | — |
 
@@ -182,6 +183,20 @@ make verify        # full local gate: fmt + vet + lint + race tests + build + pr
 make dev-down      # stop the stack (keeps data)
 make dev-clean     # stop and DELETE all volumes (prompts for confirmation)
 ```
+
+### Database
+
+```bash
+make db-migrate           # apply pending migrations
+make db-status            # what is applied, and whether any file changed after applying
+make db-rollback STEPS=1  # revert
+make test-integration     # repository tests against the real database
+```
+
+Migrations are embedded in the binary and applied on startup under a Postgres
+advisory lock, so several replicas starting at once serialise rather than race.
+Editing a migration that has already run is refused with a message naming the
+file — the database and the repository must not describe different schemas.
 
 ### The API
 
@@ -365,8 +380,8 @@ in the log.
 |---|---|---|
 | 1 | Architecture, repository, development environment | ✅ |
 | 2 | HTTP server, configuration, logging, error handling | ✅ |
-| 3 | PostgreSQL layer, migrations, repository pattern | ⏳ next |
-| 4 | Authentication (JWT) and RBAC | |
+| 3 | PostgreSQL layer, migrations, repository pattern | ✅ |
+| 4 | Authentication (JWT) and RBAC | ⏳ next |
 | 5 | Agent orchestration engine | |
 | 6 | Harness engine | |
 | 7 | Tool ecosystem | |

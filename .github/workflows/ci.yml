@@ -162,6 +162,19 @@ jobs:
             -wait 60s | tee preflight.json
           jq -e '.healthy == true' preflight.json > /dev/null
 
+      # Applying migrations as an explicit step rather than relying on the
+      # daemon's startup path: a failure here is unambiguous, and the schema is
+      # then known-good before any repository test runs.
+      - name: Apply migrations
+        run: go run ./cmd/migrate up
+        env:
+          AEGIS_PG_PORT: "5434"
+
+      - name: Verify migration status
+        run: go run ./cmd/migrate status
+        env:
+          AEGIS_PG_PORT: "5434"
+
       - name: Integration test suite
         run: go test -race -count=1 -tags=integration ./...
         env:
@@ -213,8 +226,11 @@ jobs:
           format: sarif
           output: trivy.sarif
 
+      # Guarded on the file existing, not just always(): when an earlier step
+      # fails, Trivy never runs, and an unconditional upload then fails on a
+      # missing file — masking the real failure with a confusing second one.
       - uses: github/codeql-action/upload-sarif@v3
-        if: always()
+        if: always() && hashFiles('trivy.sarif') != ''
         with:
           sarif_file: trivy.sarif
 

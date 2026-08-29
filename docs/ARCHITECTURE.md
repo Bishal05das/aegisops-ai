@@ -244,8 +244,8 @@ cmd/
   preflight/       environment doctor                          ← Phase 1 ✓
 
 internal/
-  domain/          entities, value objects, domain errors — imports NOTHING
-  ports/           driven-port interfaces (repos, bus, LLM, tools, clock)
+  domain/          entities, value objects, domain errors — imports NOTHING  ← Phase 3 ✓
+  ports/           driven-port interfaces (repos, bus, LLM, tools, clock)     ← Phase 3 ✓
   config/          typed env configuration                    ← Phase 2 ✓
   version/         build identity                              ← Phase 1 ✓
   preflight/       dependency probes                           ← Phase 1 ✓
@@ -260,8 +260,8 @@ internal/
   llm/             provider port + ollama/ llamacpp/
   memory/          shortterm/ (redis)  longterm/ (pgvector)
   events/          bus port + inproc/ rabbitmq/
-  repository/      postgres/
-  database/        pool, migrations/
+  repository/      postgres/                                  ← Phase 3 ✓
+  database/        pool, migrate/, migrations/                ← Phase 3 ✓
   security/        jwt/ rbac/ ratelimit/ secrets/
   observability/   logging/ metrics/ tracing/
 
@@ -397,6 +397,7 @@ See [ADR 0007](adr/0007-error-taxonomy.md).
 | [0005](adr/0005-postgres-with-pgvector.md) | One Postgres for records and vectors |
 | [0006](adr/0006-harness-as-security-boundary.md) | The harness is the security boundary |
 | [0007](adr/0007-error-taxonomy.md) | Errors carry two audiences |
+| [0008](adr/0008-database-sql-with-pgx.md) | `database/sql` + pgx; hand-written migrations |
 
 ---
 
@@ -406,7 +407,7 @@ See [ADR 0007](adr/0007-error-taxonomy.md).
 |---|---|---|
 | 1 | Architecture, repo, dev environment | ✅ complete |
 | 2 | HTTP server, config, logging, errors | ✅ complete |
-| 3 | Postgres layer, migrations, repositories | pending |
+| 3 | Postgres layer, migrations, repositories | ✅ complete |
 | 4 | JWT auth, RBAC | pending |
 | 5 | Agent orchestration engine | pending |
 | 6 | Harness engine | pending |
