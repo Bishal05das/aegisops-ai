@@ -19,6 +19,7 @@ import (
 	"github.com/bishal05das/aegisops-ai/internal/api/render"
 	"github.com/bishal05das/aegisops-ai/internal/config"
 	"github.com/bishal05das/aegisops-ai/internal/security/ratelimit"
+	"github.com/bishal05das/aegisops-ai/internal/security/rbac"
 	"github.com/bishal05das/aegisops-ai/pkg/errs"
 	"github.com/bishal05das/aegisops-ai/pkg/httpx"
 )
@@ -47,6 +48,9 @@ type Deps struct {
 	TokenVerifier middleware.TokenVerifier
 	// RateLimiter throttles the API globally, keyed by principal.
 	RateLimiter *ratelimit.Limiter
+
+	// Incidents serves the incident and agent endpoints.
+	Incidents *handlers.Incidents
 }
 
 // NewServer assembles the router, middleware stack and http.Server.
@@ -168,6 +172,30 @@ func (s *Server) buildRouter(deps Deps) *httpx.Router {
 			v1.Post("/auth/logout", deps.Auth.Logout, authed)
 			v1.Get("/auth/me", deps.Auth.Me, authed)
 		}
+	}
+
+	if deps.Incidents != nil && deps.TokenVerifier != nil {
+		authed := middleware.RequireAuth(deps.TokenVerifier)
+
+		// Permission is attached per route rather than per group. A new route
+		// then has to name what it requires, which is visible in a diff —
+		// whereas inheriting a group's protection makes an unprotected route
+		// look identical to a protected one.
+		v1.Post("/incidents", deps.Incidents.Create,
+			authed, middleware.RequirePermission(rbac.PermIncidentCreate))
+		v1.Get("/incidents", deps.Incidents.List,
+			authed, middleware.RequirePermission(rbac.PermIncidentRead))
+		v1.Get("/incidents/{id}", deps.Incidents.Get,
+			authed, middleware.RequirePermission(rbac.PermIncidentRead))
+		v1.Get("/incidents/{id}/timeline", deps.Incidents.Timeline,
+			authed, middleware.RequirePermission(rbac.PermIncidentRead))
+		v1.Get("/incidents/{id}/tasks", deps.Incidents.Tasks,
+			authed, middleware.RequirePermission(rbac.PermIncidentRead))
+		v1.Post("/incidents/{id}/close", deps.Incidents.Close,
+			authed, middleware.RequirePermission(rbac.PermIncidentClose))
+
+		v1.Get("/agents", deps.Incidents.ListAgents,
+			authed, middleware.RequirePermission(rbac.PermAgentRead))
 	}
 
 	// JSON for 404 and 405 rather than net/http's text defaults, so clients

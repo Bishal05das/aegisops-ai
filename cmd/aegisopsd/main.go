@@ -24,12 +24,17 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bishal05das/aegisops-ai/internal/agents"
 	"github.com/bishal05das/aegisops-ai/internal/api"
 	"github.com/bishal05das/aegisops-ai/internal/api/handlers"
 	"github.com/bishal05das/aegisops-ai/internal/config"
 	"github.com/bishal05das/aegisops-ai/internal/database"
 	"github.com/bishal05das/aegisops-ai/internal/database/migrate"
 	"github.com/bishal05das/aegisops-ai/internal/database/migrations"
+	domainagent "github.com/bishal05das/aegisops-ai/internal/domain/agent"
+	"github.com/bishal05das/aegisops-ai/internal/domain/shared"
+	"github.com/bishal05das/aegisops-ai/internal/events/inproc"
+	"github.com/bishal05das/aegisops-ai/internal/ports"
 	"github.com/bishal05das/aegisops-ai/internal/preflight"
 	"github.com/bishal05das/aegisops-ai/internal/repository/postgres"
 	"github.com/bishal05das/aegisops-ai/internal/security/password"
@@ -173,6 +178,68 @@ func run(args []string) int {
 		Logger: log,
 	})
 
+	// ---- event bus ----------------------------------------------------------
+	bus := buildEventBus(cfg, log)
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := bus.Close(closeCtx); err != nil {
+			log.Warn("the event bus did not drain cleanly", "error", err)
+		}
+	}()
+
+	// ---- agents and orchestration -------------------------------------------
+	agentRepo := postgres.NewAgentRepo(db)
+	taskRepo := postgres.NewTaskRepo(db)
+	incidentRepo := postgres.NewIncidentRepo(db)
+
+	// The roster is reconciled from code on every start, so it cannot drift
+	// from what this binary actually implements. Upsert deliberately leaves an
+	// operator's `enabled` flag alone — see AgentRepository.Upsert.
+	registry, regErr := registerAgents(ctx, agentRepo, log)
+	if regErr != nil {
+		log.Error("could not register the agent roster", "error", regErr)
+		return exitFailure
+	}
+
+	reasoner := agents.NewScriptedReasoner()
+	log.Info("reasoning provider selected", "provider", reasoner.Name(),
+		"note", "Phase 8 replaces this with a local model behind the same port")
+
+	roster := agents.BuildAll(agents.Deps{
+		Reasoner: reasoner,
+		Clock:    shared.SystemClock{},
+		Registry: registry,
+	})
+
+	orchestrator := agents.NewOrchestrator(agents.OrchestratorDeps{
+		Agents:    roster,
+		Incidents: incidentRepo,
+		Tasks:     taskRepo,
+		Bus:       bus,
+		Logger:    log,
+	})
+	if err := orchestrator.Start(ctx); err != nil {
+		log.Error("could not start the orchestrator", "error", err)
+		return exitFailure
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := orchestrator.Shutdown(shutdownCtx); err != nil {
+			log.Warn("investigations did not stop cleanly", "error", err)
+		}
+	}()
+
+	incidentSvc := services.NewIncidentService(services.IncidentDeps{
+		Incidents: incidentRepo,
+		Tasks:     taskRepo,
+		Audit:     audit,
+		Bus:       bus,
+		Tx:        txm,
+		Logger:    log,
+	})
+
 	health := handlers.NewHealth(
 		handlers.WithChecks(dependencyChecks(cfg, db, schemaVersion)...),
 	)
@@ -185,6 +252,7 @@ func run(args []string) int {
 			handlers.WithLoginLimiter(loginLimiter),
 			handlers.WithMaxBodyBytes(cfg.HTTP.MaxBodyBytes),
 		),
+		Incidents:     handlers.NewIncidents(incidentSvc, agentRepo, cfg.HTTP.MaxBodyBytes),
 		TokenVerifier: verifier,
 		RateLimiter:   apiLimiter,
 	})
@@ -283,6 +351,67 @@ func buildTokens(cfg *config.Config) (*token.Signer, *token.Verifier, error) {
 		return nil, nil, err
 	}
 	return signer, verifier, nil
+}
+
+// buildEventBus selects the bus implementation.
+//
+// RabbitMQ is the production driver and the in-process bus serves single-node
+// development and every test. Both satisfy ports.EventBus, so nothing above this
+// line knows which is wired in — which is the whole point of the port. See
+// docs/adr/0004.
+func buildEventBus(cfg *config.Config, log *slog.Logger) ports.EventBus {
+	switch cfg.AMQP.Driver {
+	case "rabbitmq":
+		// Phase 5 ships the port and the in-process implementation; the AMQP
+		// adapter follows. Config validation already refuses `inproc` in
+		// production, so this fallback cannot silently ship there.
+		log.Warn("the rabbitmq event bus adapter is not implemented yet; using the in-process bus",
+			"driver", cfg.AMQP.Driver)
+	default:
+	}
+	return inproc.New(inproc.Config{
+		Logger: log,
+		OnDeadLetter: func(e ports.Event, cause error) {
+			log.Error("an event was dead-lettered after exhausting its retries",
+				"topic", e.Type, "incident_id", e.IncidentID.String(), "cause", cause)
+		},
+	})
+}
+
+// registerAgents reconciles the roster from code into the database.
+//
+// From code rather than from a seed migration: a migration would drift the
+// moment an agent's description changed and would need a new one for every such
+// edit. Upsert preserves each agent's id, created_at and — importantly — its
+// `enabled` flag, so a restart cannot re-arm an agent an operator switched off.
+func registerAgents(ctx context.Context, repo ports.AgentRepository, log *slog.Logger) (map[domainagent.Kind]agents.Registration, error) {
+	clock := shared.SystemClock{}
+	out := make(map[domainagent.Kind]agents.Registration, len(domainagent.AllKinds))
+
+	descriptions := map[domainagent.Kind]string{
+		domainagent.KindIncidentManager: "Plans and coordinates the investigation",
+		domainagent.KindMonitoring:      "Collects metrics and service health",
+		domainagent.KindLogAnalysis:     "Analyses logs for errors and patterns",
+		domainagent.KindDiagnosis:       "Determines the root cause and its confidence",
+		domainagent.KindSecurity:        "Checks for vulnerabilities and misconfiguration",
+		domainagent.KindAction:          "Proposes remediations for human approval",
+		domainagent.KindDocumentation:   "Writes the incident report and postmortem",
+	}
+
+	for _, kind := range domainagent.AllKinds {
+		a, err := domainagent.New(clock, string(kind), kind, descriptions[kind])
+		if err != nil {
+			return nil, fmt.Errorf("build agent %s: %w", kind, err)
+		}
+		if err := repo.Upsert(ctx, a); err != nil {
+			return nil, fmt.Errorf("register agent %s: %w", kind, err)
+		}
+		out[kind] = agents.Registration{ID: a.ID, Name: a.Name, Kind: kind}
+	}
+
+	log.Info("agent roster reconciled", "agents", len(out),
+		"mutating", 1, "read_only", len(out)-1)
+	return out, nil
 }
 
 // flags holds parsed command-line options.
