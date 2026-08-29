@@ -30,8 +30,6 @@ type memIncidents struct {
 	mu        sync.Mutex
 	incidents map[shared.ID]*incident.Incident
 	events    map[shared.ID][]*incident.Event
-	// appendDelay widens the window in which concurrent appends can collide.
-	appendDelay time.Duration
 }
 
 func newMemIncidents() *memIncidents {
@@ -87,9 +85,6 @@ func (m *memIncidents) Count(context.Context, ports.IncidentFilter) (int64, erro
 
 // AppendEvent serialises per incident, matching the adapter's contract.
 func (m *memIncidents) AppendEvent(_ context.Context, ev *incident.Event) error {
-	if m.appendDelay > 0 {
-		time.Sleep(m.appendDelay)
-	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	ev.Seq = int64(len(m.events[ev.IncidentID]) + 1)
@@ -701,8 +696,6 @@ func TestOnlyTheActionAgentProposesMutations(t *testing.T) {
 		if !mutatingActions[action] {
 			return nil
 		}
-		name, _ := e.Payload["agent_id"].(string)
-		_ = name
 		mu.Lock()
 		defer mu.Unlock()
 		byAgent[action]++

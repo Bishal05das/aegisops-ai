@@ -153,10 +153,22 @@ onto callers guarantees the bug at each one. The fix is a per-incident
 job, and the port now says implementations MUST serialise. Per incident, not
 globally, so unrelated incidents still proceed in parallel.
 
-The same mistake, in the same shape, appeared in `Evidence`: writes were guarded
-by a mutex and readers were told to call `Snapshot()` first — but *taking the
-snapshot is itself a read of the shared map*. Both are now the type's own
-responsibility rather than a protocol callers must remember.
+The same mistake, in the same shape, appeared in `Evidence`, which three agents
+write concurrently. Its writes were guarded by a mutex and readers were told to
+call `Snapshot()` first — but *taking the snapshot is itself a read of the shared
+map*, which `-race` caught immediately.
+
+Locking the readers fixed the crash and left the design flaw: the maps were still
+exported fields, so any caller could reach past the mutex, and two already did.
+They are now unexported, and access goes through `Has`, `Get`, `Snapshot`,
+`Fields`, `AgentCount` and `FailureCount`. Unexporting is the actual fix —
+without it, correctness depends on every future caller choosing the accessor over
+the field, which is the same bet that lost twice already.
+
+The general rule both bugs teach: **a type that owns an invariant must own the
+access to it.** A locking or retry protocol that callers are asked to remember is
+a bug waiting for its first forgetful caller, and "every caller must" is a strong
+hint the obligation is in the wrong place.
 
 Both are covered by regression tests that fail against the original code.
 

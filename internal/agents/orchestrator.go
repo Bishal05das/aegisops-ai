@@ -321,8 +321,8 @@ func (o *Orchestrator) Investigate(ctx context.Context, incidentID shared.ID) er
 
 	log.Info("investigation complete",
 		"duration", time.Since(started).String(),
-		"agents_run", len(evidence.Summaries),
-		"agents_failed", len(evidence.Errors),
+		"agents_run", evidence.AgentCount(),
+		"agents_failed", evidence.FailureCount(),
 		"tool_calls_proposed", proposed)
 
 	return nil

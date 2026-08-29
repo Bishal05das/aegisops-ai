@@ -108,39 +108,41 @@ type Output struct {
 // Safe for concurrent use. The orchestrator runs three agents at once in its
 // first wave, so every method here takes the lock — including the readers.
 //
-// An earlier version guarded only the writes and relied on callers taking a
-// Snapshot before reading. That was wrong in a way worth recording: *taking the
-// snapshot is itself a read of the shared maps*, so the race detector caught
-// concurrent map iteration against a guarded write. Making the type responsible
-// for its own safety is the fix; expecting every caller to remember a locking
-// protocol is how this bug happened.
+// The maps are unexported so that they cannot be read without one. That is the
+// point rather than an accident of style: an earlier version guarded only the
+// writes and told callers to take a Snapshot before reading, which was wrong
+// twice over. *Taking the snapshot is itself a read of the shared maps*, so the
+// race detector caught concurrent iteration against a guarded write — and even
+// with that fixed, exported maps let any caller reach past the lock entirely.
+// A type that owns an invariant has to own the access too; a locking protocol
+// every caller must remember is a bug waiting for its first forgetful caller.
 type Evidence struct {
 	mu sync.RWMutex
 
-	// Findings maps an agent kind to what it produced.
-	Findings map[agent.Kind]map[string]any
+	// findings maps an agent kind to what it produced.
+	findings map[agent.Kind]map[string]any
 
-	// Summaries maps an agent kind to its one-line conclusion, which is what
+	// summaries maps an agent kind to its one-line conclusion, which is what
 	// gets rendered into a reasoner prompt.
-	Summaries map[agent.Kind]string
+	summaries map[agent.Kind]string
 
-	// Confidences records each agent's certainty, so Diagnosis can weight
+	// confidences records each agent's certainty, so Diagnosis can weight
 	// evidence from an agent that was itself unsure.
-	Confidences map[agent.Kind]float64
+	confidences map[agent.Kind]float64
 
-	// Errors records agents that failed. Deliberately preserved rather than
+	// errors records agents that failed. Deliberately preserved rather than
 	// discarded: "the Log Analysis agent could not reach the cluster" is itself
 	// evidence, and a diagnosis reached without it should say so.
-	Errors map[agent.Kind]string
+	errors map[agent.Kind]string
 }
 
 // NewEvidence builds an empty evidence set.
 func NewEvidence() *Evidence {
 	return &Evidence{
-		Findings:    make(map[agent.Kind]map[string]any),
-		Summaries:   make(map[agent.Kind]string),
-		Confidences: make(map[agent.Kind]float64),
-		Errors:      make(map[agent.Kind]string),
+		findings:    make(map[agent.Kind]map[string]any),
+		summaries:   make(map[agent.Kind]string),
+		confidences: make(map[agent.Kind]float64),
+		errors:      make(map[agent.Kind]string),
 	}
 }
 
@@ -150,24 +152,24 @@ func (e *Evidence) Record(kind agent.Kind, out Output) {
 	defer e.mu.Unlock()
 
 	if out.Findings != nil {
-		e.Findings[kind] = out.Findings
+		e.findings[kind] = out.Findings
 	}
-	e.Summaries[kind] = out.Summary
-	e.Confidences[kind] = out.Confidence
+	e.summaries[kind] = out.Summary
+	e.confidences[kind] = out.Confidence
 }
 
 // RecordError notes that an agent failed.
 func (e *Evidence) RecordError(kind agent.Kind, err error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.Errors[kind] = err.Error()
+	e.errors[kind] = err.Error()
 }
 
 // Has reports whether an agent contributed findings.
 func (e *Evidence) Has(kind agent.Kind) bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	_, ok := e.Findings[kind]
+	_, ok := e.findings[kind]
 	return ok
 }
 
@@ -175,7 +177,7 @@ func (e *Evidence) Has(kind agent.Kind) bool {
 func (e *Evidence) Get(kind agent.Kind) map[string]any {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	src := e.Findings[kind]
+	src := e.findings[kind]
 	if src == nil {
 		return nil
 	}
@@ -196,21 +198,21 @@ func (e *Evidence) Snapshot() *Evidence {
 	defer e.mu.RUnlock()
 
 	out := NewEvidence()
-	for k, v := range e.Findings {
+	for k, v := range e.findings {
 		copied := make(map[string]any, len(v))
 		for kk, vv := range v {
 			copied[kk] = vv
 		}
-		out.Findings[k] = copied
+		out.findings[k] = copied
 	}
-	for k, v := range e.Summaries {
-		out.Summaries[k] = v
+	for k, v := range e.summaries {
+		out.summaries[k] = v
 	}
-	for k, v := range e.Confidences {
-		out.Confidences[k] = v
+	for k, v := range e.confidences {
+		out.confidences[k] = v
 	}
-	for k, v := range e.Errors {
-		out.Errors[k] = v
+	for k, v := range e.errors {
+		out.errors[k] = v
 	}
 	return out
 }
@@ -225,15 +227,18 @@ func (e *Evidence) Complete() bool {
 	return e.Has(agent.KindMonitoring)
 }
 
-// Failed reports the agents that errored, detached from the shared map.
-func (e *Evidence) Failed() map[agent.Kind]string {
+// AgentCount reports how many agents have contributed a conclusion.
+func (e *Evidence) AgentCount() int {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	out := make(map[agent.Kind]string, len(e.Errors))
-	for k, v := range e.Errors {
-		out[k] = v
-	}
-	return out
+	return len(e.summaries)
+}
+
+// FailureCount reports how many agents errored.
+func (e *Evidence) FailureCount() int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return len(e.errors)
 }
 
 // Fields renders evidence for a reasoner prompt or a log line.
@@ -242,11 +247,11 @@ func (e *Evidence) Fields() map[string]any {
 	defer e.mu.RUnlock()
 
 	out := map[string]any{}
-	for kind, summary := range e.Summaries {
+	for kind, summary := range e.summaries {
 		out[string(kind)] = summary
 	}
-	if len(e.Errors) > 0 {
-		out["failed_agents"] = e.Errors
+	if len(e.errors) > 0 {
+		out["failed_agents"] = e.errors
 	}
 	return out
 }

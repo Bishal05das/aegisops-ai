@@ -368,7 +368,7 @@ func (a *Action) Execute(ctx context.Context, in Input) (Output, error) {
 			op, shared.ErrValidation)
 	}
 
-	diagnosis := in.Evidence.Findings[agent.KindDiagnosis]
+	diagnosis := in.Evidence.Get(agent.KindDiagnosis)
 	confidence, _ := diagnosis[FindingConfidence].(float64)
 
 	// The first of the two independent gates. Below this, no intent is even
