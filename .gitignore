@@ -1,0 +1,37 @@
+# Build output
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+
+# Coverage
+coverage.out
+coverage.html
+
+# Environment / secrets — never commit these
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+!deployments/**/*.key.example
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Go workspace
+go.work
+go.work.sum
+
+# Local data volumes (if bind-mounted during debugging)
+/.data/
+/tmp/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.next/

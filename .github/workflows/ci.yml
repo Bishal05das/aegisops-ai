@@ -1,0 +1,221 @@
+# AegisOps AI — continuous integration
+#
+# Job layout mirrors how fast each stage fails. `quality` runs in seconds and
+# gates everything expensive behind it, so a gofmt slip never costs a container
+# pull. Integration tests spin real Postgres/Redis/RabbitMQ service containers
+# rather than mocks — the entire point of the preflight probes is that they speak
+# real protocols, and a mocked CI would prove nothing about them.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# A new push to a PR makes the previous run irrelevant; cancel it.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.24"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  quality:
+    name: Format, vet, lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Verify go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum \
+            || { echo "::error::go.mod/go.sum are not tidy — run 'make tidy'"; exit 1; }
+
+      - name: gofmt
+        run: make fmt-check
+
+      - name: go vet
+        run: make vet
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v2.1.0
+          args: --timeout=5m
+
+  # ---------------------------------------------------------------------------
+  unit-tests:
+    name: Unit tests (race)
+    runs-on: ubuntu-latest
+    needs: quality
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # -race is non-negotiable: the orchestrator fans agents out across
+      # goroutines and a data race there corrupts incident state silently.
+      - name: Run tests
+        run: go test -race -count=1 -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Coverage summary
+        run: go tool cover -func=coverage.out | tail -20
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: coverage.out
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  integration-tests:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    needs: quality
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: aegis
+          POSTGRES_PASSWORD: aegis_dev_password
+          POSTGRES_DB: aegisops
+        ports: ["5434:5432"]
+        options: >-
+          --health-cmd "pg_isready -U aegis -d aegisops"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6380:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+
+      rabbitmq:
+        image: rabbitmq:4.0-management-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: aegis
+          RABBITMQ_DEFAULT_PASS: aegis_dev_password
+        ports: ["5672:5672", "15672:15672"]
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q check_running"
+          --health-interval 10s --health-timeout 10s --health-retries 12
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Create extensions
+        run: |
+          PGPASSWORD=aegis_dev_password psql -h localhost -p 5434 -U aegis -d aegisops \
+            -c "CREATE EXTENSION IF NOT EXISTS vector;" \
+            -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;" \
+            -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
+
+      # The preflight binary is itself the first integration test: it asserts
+      # every service is not merely listening but speaking its own protocol.
+      # -only skips the observability stack, which is not present in CI.
+      - name: Preflight against live services
+        run: |
+          go run ./cmd/preflight -json \
+            -only go-runtime,postgres,redis,rabbitmq,rabbitmq-ui \
+            -wait 60s | tee preflight.json
+          jq -e '.healthy == true' preflight.json > /dev/null
+
+      - name: Integration test suite
+        run: go test -race -count=1 -tags=integration ./...
+        env:
+          AEGIS_PG_PORT: "5434"
+          AEGIS_REDIS_PORT: "6380"
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: preflight-report
+          path: preflight.json
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  security:
+    name: Security scan
+    runs-on: ubuntu-latest
+    needs: quality
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # Known CVEs in our dependency graph, reachability-aware.
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: sarif
+          output: trivy.sarif
+
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy.sarif
+
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build binaries
+    runs-on: ubuntu-latest
+    needs: [unit-tests, integration-tests]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `git describe` needs full history to find the nearest tag, which
+          # becomes the version stamped into every audit log entry.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Build
+        run: make build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries
+          path: bin/
+          retention-days: 7
