@@ -35,9 +35,12 @@ GO       ?= go
 GOFLAGS  ?=
 SVC      ?=
 
+# Kept in lockstep with .github/workflows/ci.yml so local lint == CI lint.
+GOLANGCI_VERSION ?= v2.13.2
+
 .DEFAULT_GOAL := help
 .PHONY: help env gen-secret tidy fmt fmt-check vet lint test test-race cover \
-        build clean run run-check preflight preflight-json preflight-wait \
+        build clean run run-check lint-config preflight preflight-json preflight-wait \
         dev-up dev-up-ollama dev-down dev-restart dev-ps dev-logs dev-clean dev-reset \
         psql redis-cli rabbit-ui ci verify
 
@@ -97,15 +100,17 @@ fmt-check:
 vet:
 	$(GO) vet ./...
 
-## lint: run golangci-lint if installed, otherwise fall back to vet
+## lint: run golangci-lint (installs the pinned version if missing)
 lint:
-	@if command -v golangci-lint >/dev/null 2>&1; then \
-		golangci-lint run ./...; \
-	else \
-		echo "golangci-lint not installed — falling back to go vet"; \
-		echo "install: https://golangci-lint.run/welcome/install/"; \
-		$(GO) vet ./...; \
-	fi
+	@command -v golangci-lint >/dev/null 2>&1 || { \
+		echo "installing golangci-lint $(GOLANGCI_VERSION)..."; \
+		$(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION); \
+	}
+	@PATH="$$PATH:$$($(GO) env GOPATH)/bin"; golangci-lint run ./...
+
+## lint-config: validate .golangci.yml against the v2 JSONSchema
+lint-config:
+	@PATH="$$PATH:$$($(GO) env GOPATH)/bin"; golangci-lint config verify
 
 ## test: run unit tests
 test:

@@ -290,14 +290,16 @@ func TestEArgumentForms(t *testing.T) {
 	if e := E("op", Invalid, "msg"); e.Message != "msg" || e.Err != nil {
 		t.Errorf("message-only form: %+v", e)
 	}
-	if e := E("op", Invalid, cause); e.Err != cause || e.Message != "" {
+	// Identity, not equivalence: E must store the exact error it was handed,
+	// so errors.Is is the wrong tool here.
+	if e := E("op", Invalid, cause); !errors.Is(e.Err, cause) || e.Message != "" {
 		t.Errorf("error-only form: %+v", e)
 	}
-	if e := E("op", Invalid, "msg", cause); e.Message != "msg" || e.Err != cause {
+	if e := E("op", Invalid, "msg", cause); e.Message != "msg" || !errors.Is(e.Err, cause) {
 		t.Errorf("message+error form: %+v", e)
 	}
 	// Order-independence keeps call sites from having to remember a convention.
-	if e := E("op", Invalid, cause, "msg"); e.Message != "msg" || e.Err != cause {
+	if e := E("op", Invalid, cause, "msg"); e.Message != "msg" || !errors.Is(e.Err, cause) {
 		t.Errorf("error+message form: %+v", e)
 	}
 	// A misused argument must be visible, not silently dropped.

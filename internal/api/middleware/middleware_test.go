@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -161,7 +162,9 @@ func TestRecoveryRepanicsOnErrAbortHandler(t *testing.T) {
 	t.Parallel()
 
 	defer func() {
-		if p := recover(); p != http.ErrAbortHandler {
+		p := recover()
+		err, ok := p.(error)
+		if !ok || !errors.Is(err, http.ErrAbortHandler) {
 			t.Errorf("recovered %v, want ErrAbortHandler to propagate", p)
 		}
 	}()
@@ -178,7 +181,9 @@ func TestRecoveryAbortsWhenResponseAlreadyStarted(t *testing.T) {
 	t.Parallel()
 
 	defer func() {
-		if p := recover(); p != http.ErrAbortHandler {
+		p := recover()
+		err, ok := p.(error)
+		if !ok || !errors.Is(err, http.ErrAbortHandler) {
 			t.Errorf("recovered %v, want ErrAbortHandler after a partial write", p)
 		}
 	}()

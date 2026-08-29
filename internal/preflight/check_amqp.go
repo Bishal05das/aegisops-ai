@@ -58,7 +58,8 @@ func (c *AMQPCheck) Probe(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer conn.Close()
+	// The probe is read-only; a close failure tells us nothing actionable.
+	defer func() { _ = conn.Close() }()
 
 	if _, err := conn.Write(amqp091Header); err != nil {
 		return "", fmt.Errorf("write protocol header: %w", err)

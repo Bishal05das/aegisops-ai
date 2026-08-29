@@ -63,7 +63,7 @@ func (c *OllamaCheck) Probe(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("GET /api/tags: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("GET /api/tags returned %s", resp.Status)

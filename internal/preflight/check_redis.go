@@ -44,13 +44,14 @@ func (c *RedisCheck) Probe(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer conn.Close()
+	// The probe is read-only; a close failure tells us nothing actionable.
+	defer func() { _ = conn.Close() }()
 
 	rw := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
 
 	if c.Password != "" {
-		if _, err := respCommand(rw, "AUTH", c.Password); err != nil {
-			return "", fmt.Errorf("AUTH: %w", err)
+		if _, authErr := respCommand(rw, "AUTH", c.Password); authErr != nil {
+			return "", fmt.Errorf("AUTH: %w", authErr)
 		}
 	}
 

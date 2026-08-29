@@ -51,10 +51,16 @@ jobs:
       - name: go vet
         run: make vet
 
+      # Action v9 + golangci-lint v2. The pairing is load-bearing: action v6
+      # only understands golangci-lint v1 and rejects a v2 version string
+      # outright, and .golangci.yml here is a v2 config. `verify` additionally
+      # validates that config against the published JSONSchema, so a malformed
+      # linter config fails here rather than silently linting nothing.
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.1.0
+          version: v2.13.2
+          verify: true
           args: --timeout=5m
 
   # ---------------------------------------------------------------------------

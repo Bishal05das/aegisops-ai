@@ -97,19 +97,27 @@ func (r *Router) HandleFunc(method, pattern string, h http.HandlerFunc, mw ...Mi
 	r.Handle(method, pattern, h, mw...)
 }
 
-// Convenience registrars for the verbs this API uses.
+// Get registers a GET route.
 func (r *Router) Get(p string, h http.HandlerFunc, mw ...Middleware) {
 	r.Handle(http.MethodGet, p, h, mw...)
 }
+
+// Post registers a POST route.
 func (r *Router) Post(p string, h http.HandlerFunc, mw ...Middleware) {
 	r.Handle(http.MethodPost, p, h, mw...)
 }
+
+// Put registers a PUT route.
 func (r *Router) Put(p string, h http.HandlerFunc, mw ...Middleware) {
 	r.Handle(http.MethodPut, p, h, mw...)
 }
+
+// Patch registers a PATCH route.
 func (r *Router) Patch(p string, h http.HandlerFunc, mw ...Middleware) {
 	r.Handle(http.MethodPatch, p, h, mw...)
 }
+
+// Delete registers a DELETE route.
 func (r *Router) Delete(p string, h http.HandlerFunc, mw ...Middleware) {
 	r.Handle(http.MethodDelete, p, h, mw...)
 }
@@ -160,8 +168,8 @@ func (r *Router) dispatchUnmatched(w http.ResponseWriter, req *http.Request) {
 	probe := &headerProbe{header: make(http.Header)}
 	r.mux.ServeHTTP(probe, req)
 
-	switch {
-	case probe.status == http.StatusMethodNotAllowed:
+	switch probe.status {
+	case http.StatusMethodNotAllowed:
 		if allow := probe.header.Get("Allow"); allow != "" {
 			w.Header().Set("Allow", allow)
 		}
@@ -171,7 +179,7 @@ func (r *Router) dispatchUnmatched(w http.ResponseWriter, req *http.Request) {
 		}
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 
-	case probe.status == http.StatusNotFound:
+	case http.StatusNotFound:
 		if r.notFound != nil {
 			r.notFound.ServeHTTP(w, req)
 			return
@@ -192,14 +200,17 @@ type headerProbe struct {
 	status int
 }
 
+// Header implements http.ResponseWriter.
 func (p *headerProbe) Header() http.Header { return p.header }
 
+// WriteHeader implements http.ResponseWriter, recording only the first status.
 func (p *headerProbe) WriteHeader(status int) {
 	if p.status == 0 {
 		p.status = status
 	}
 }
 
+// Write implements http.ResponseWriter, discarding the body.
 func (p *headerProbe) Write(b []byte) (int, error) {
 	if p.status == 0 {
 		p.status = http.StatusOK

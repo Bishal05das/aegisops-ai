@@ -111,7 +111,14 @@ func Time(s string) (time.Time, error) {
 	}
 	var ms uint64
 	for i := 0; i < timeChars; i++ {
-		ms = ms<<5 | uint64(strings.IndexByte(crockford, upper(s[i])))
+		// Valid(s) above guarantees every byte is in the alphabet, so IndexByte
+		// cannot return -1 here. The explicit guard keeps that invariant local
+		// rather than relying on a caller three lines up.
+		idx := strings.IndexByte(crockford, upper(s[i]))
+		if idx < 0 {
+			return time.Time{}, ErrInvalid
+		}
+		ms = ms<<5 | uint64(idx)
 	}
 	return time.UnixMilli(int64(ms)), nil
 }

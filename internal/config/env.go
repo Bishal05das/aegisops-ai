@@ -57,15 +57,6 @@ func (l *loader) str(key, def string) string {
 	return def
 }
 
-// required reads a string that must be present.
-func (l *loader) required(key string) string {
-	v, ok := l.get(key)
-	if !ok {
-		l.errs = append(l.errs, fmt.Errorf("%s is required but not set", key))
-	}
-	return v
-}
-
 // secret reads a value into a Secret, which redacts itself everywhere.
 func (l *loader) secret(key, def string) Secret {
 	if v, ok := l.get(key); ok {

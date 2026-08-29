@@ -169,7 +169,12 @@ func (s *Server) Run(ctx context.Context) error {
 
 	// Bind explicitly rather than via ListenAndServe so that a port conflict is
 	// reported synchronously, before anything announces itself as started.
-	ln, err := net.Listen("tcp", s.cfg.Addr)
+	//
+	// ListenConfig rather than net.Listen so the bind itself honours ctx — a
+	// SIGTERM arriving during startup aborts cleanly instead of binding a port
+	// the process is about to abandon.
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", s.cfg.Addr)
 	if err != nil {
 		return errs.E(op, errs.Unavailable, "bind "+s.cfg.Addr, err)
 	}
@@ -201,9 +206,17 @@ func (s *Server) Run(ctx context.Context) error {
 	case <-ctx.Done():
 		s.log.Info("shutting down http server", "grace", s.cfg.ShutdownGrace.String())
 
-		// A fresh context: the parent is already cancelled, and Shutdown needs
-		// its own budget to drain in-flight work.
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), s.cfg.ShutdownGrace)
+		// ctx is *already* cancelled — that is what got us here — so deriving
+		// the shutdown budget from it directly would give Shutdown zero time and
+		// sever in-flight requests immediately: the precise opposite of a
+		// graceful drain.
+		//
+		// WithoutCancel rather than context.Background(): it drops the
+		// cancellation but keeps the context's values, so any trace or request
+		// scope attached upstream survives into the drain. Background() would
+		// silently discard them.
+		shutdownCtx, cancel := context.WithTimeout(
+			context.WithoutCancel(ctx), s.cfg.ShutdownGrace)
 		defer cancel()
 
 		start := time.Now()

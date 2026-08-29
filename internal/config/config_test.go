@@ -330,8 +330,9 @@ func TestSecretRedactsThroughEveryPrintingPath(t *testing.T) {
 	s := Secret(plaintext)
 
 	renders := map[string]string{
-		"String()":      s.String(),
-		"fmt %v":        fmt.Sprintf("%v", s),
+		"String()": s.String(),
+		"fmt %v":   fmt.Sprintf("%v", s),
+		//nolint:staticcheck // the point of the test is that %s routes through Stringer
 		"fmt %s":        fmt.Sprintf("%s", s),
 		"fmt %q":        fmt.Sprintf("%q", s),
 		"fmt %#v":       fmt.Sprintf("%#v", s),

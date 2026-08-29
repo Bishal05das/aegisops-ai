@@ -19,9 +19,16 @@ type base struct {
 	severity Severity
 }
 
-func (b base) Name() string       { return b.name }
-func (b base) Target() string     { return b.target }
-func (b base) Hint() string       { return b.hint }
+// Name implements Check.
+func (b base) Name() string { return b.name }
+
+// Target implements Check.
+func (b base) Target() string { return b.target }
+
+// Hint implements Check.
+func (b base) Hint() string { return b.hint }
+
+// Severity implements Check.
 func (b base) Severity() Severity { return b.severity }
 
 // dial opens a TCP connection bounded by ctx and applies the context deadline to
@@ -68,7 +75,8 @@ func (c *TCPCheck) Probe(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer conn.Close()
+	// The probe is read-only; a close failure tells us nothing actionable.
+	defer func() { _ = conn.Close() }()
 	return "tcp connect ok", nil
 }
 
@@ -132,7 +140,7 @@ func (c *HTTPCheck) Probe(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("http get: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	limit := c.MaxBody
 	if limit <= 0 {
@@ -169,9 +177,9 @@ func (c *HTTPCheck) accepts(code int) bool {
 // error, collapsing whitespace so multi-line error pages stay readable.
 func snippet(b []byte) string {
 	s := strings.Join(strings.Fields(string(b)), " ")
-	const max = 120
-	if len(s) > max {
-		return s[:max] + "…"
+	const limit = 120
+	if len(s) > limit {
+		return s[:limit] + "…"
 	}
 	if s == "" {
 		return "<empty body>"

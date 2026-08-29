@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"runtime/debug"
@@ -37,12 +38,17 @@ func Recovery() Middleware {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			rec := httpx.NewResponseRecorder(w)
 
-			defer func() {
+			// contextcheck cannot see that r is the request handed to this
+			// closure, so it reports a false positive on the r.Context() below.
+			defer func() { //nolint:contextcheck // ctx is inherited from r
 				p := recover()
 				if p == nil {
 					return
 				}
-				if p == http.ErrAbortHandler {
+				// recover() yields `any`, so this must type-assert before
+				// comparing. errors.Is rather than == because a handler may
+				// legitimately wrap the sentinel before re-panicking.
+				if err, ok := p.(error); ok && errors.Is(err, http.ErrAbortHandler) {
 					panic(p) // deliberate abort; let net/http handle it
 				}
 

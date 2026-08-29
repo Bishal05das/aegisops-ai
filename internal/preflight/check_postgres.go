@@ -48,7 +48,8 @@ func (c *PostgresCheck) Probe(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer conn.Close()
+	// The probe is read-only; a close failure tells us nothing actionable.
+	defer func() { _ = conn.Close() }()
 
 	// An SSLRequest is a self-describing 8-byte packet: its own length,
 	// then the magic code. There is no message-type byte during startup.
