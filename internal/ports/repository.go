@@ -151,6 +151,43 @@ type UserRepository interface {
 	RecordLogin(ctx context.Context, id user.ID, at time.Time) error
 }
 
+// SessionRepository persists refresh tokens.
+//
+// Refresh tokens are opaque and stored hashed; the plaintext never reaches this
+// interface except to be looked up by digest.
+type SessionRepository interface {
+	Create(ctx context.Context, t *user.RefreshToken) error
+
+	// GetByPlaintext hashes the presented value and looks it up. Returns
+	// shared.ErrNotFound for an unrecognised token, saying nothing about
+	// whether it ever existed.
+	GetByPlaintext(ctx context.Context, plaintext string) (*user.RefreshToken, error)
+
+	// Rotate atomically marks a token used and stores its replacement. It must
+	// fail with shared.ErrConflict if the token was already rotated, so two
+	// concurrent refreshes cannot both succeed.
+	Rotate(ctx context.Context, oldID shared.ID, next *user.RefreshToken) error
+
+	// RevokeFamily invalidates every token descended from one login. Called on
+	// replay detection: a rotated token presented again means the lineage is
+	// no longer trustworthy.
+	RevokeFamily(ctx context.Context, familyID shared.ID, reason string, at time.Time) (int64, error)
+
+	// RevokeAllForUser is logout-everywhere, and the correct response to a
+	// password change or a role downgrade.
+	RevokeAllForUser(ctx context.Context, userID user.ID, reason string, at time.Time) (int64, error)
+
+	// Revoke invalidates one token. Revoking an already-revoked token is a
+	// no-op, because logging out twice is not an error.
+	Revoke(ctx context.Context, id shared.ID, reason string, at time.Time) error
+
+	// DeleteExpired is housekeeping: an expired token is already unusable, but
+	// every login and every refresh adds a row.
+	DeleteExpired(ctx context.Context, before time.Time) (int64, error)
+
+	ListForUser(ctx context.Context, userID user.ID) ([]*user.RefreshToken, error)
+}
+
 // ToolCallFilter narrows a tool-call query.
 type ToolCallFilter struct {
 	IncidentID *shared.ID

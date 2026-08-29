@@ -252,7 +252,7 @@ internal/
 
   api/             HTTP driving adapter (raw net/http)      ← Phase 2 ✓
     handlers/  middleware/  render/  dto/
-  services/        application use cases
+  services/        application use cases                      ← Phase 4 ✓
   agents/          the seven agents + orchestrator
   harness/
     registry/  permission/  policy/  approval/  audit/
@@ -262,7 +262,7 @@ internal/
   events/          bus port + inproc/ rabbitmq/
   repository/      postgres/                                  ← Phase 3 ✓
   database/        pool, migrate/, migrations/                ← Phase 3 ✓
-  security/        jwt/ rbac/ ratelimit/ secrets/
+  security/        token/ password/ rbac/ ratelimit/            ← Phase 4 ✓
   observability/   logging/ metrics/ tracing/
 
 pkg/               reusable, no AegisOps domain knowledge
@@ -398,6 +398,7 @@ See [ADR 0007](adr/0007-error-taxonomy.md).
 | [0006](adr/0006-harness-as-security-boundary.md) | The harness is the security boundary |
 | [0007](adr/0007-error-taxonomy.md) | Errors carry two audiences |
 | [0008](adr/0008-database-sql-with-pgx.md) | `database/sql` + pgx; hand-written migrations |
+| [0009](adr/0009-authentication-and-rbac.md) | Hand-written JWT, argon2id, rotating refresh tokens |
 
 ---
 
@@ -408,7 +409,7 @@ See [ADR 0007](adr/0007-error-taxonomy.md).
 | 1 | Architecture, repo, dev environment | ✅ complete |
 | 2 | HTTP server, config, logging, errors | ✅ complete |
 | 3 | Postgres layer, migrations, repositories | ✅ complete |
-| 4 | JWT auth, RBAC | pending |
+| 4 | JWT auth, RBAC | ✅ complete |
 | 5 | Agent orchestration engine | pending |
 | 6 | Harness engine | pending |
 | 7 | Tool ecosystem | pending |

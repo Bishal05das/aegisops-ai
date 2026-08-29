@@ -365,6 +365,16 @@ func (c *Config) validate(l *loader) {
 	}
 
 	// ---- JWT secret ---------------------------------------------------------
+	//
+	// Config validates the secret's FORMAT but does not require its presence
+	// outside production, and that separation is deliberate. This same loader
+	// serves `migrate` and `aegisctl`, neither of which signs a token — making
+	// `aegisctl user list` fail for want of a JWT secret would be wrong.
+	//
+	// Presence is enforced where the secret is actually used: aegisopsd builds
+	// its signer at startup, and token.NewSigner rejects anything under 32
+	// bytes, which includes the empty string. The daemon therefore still cannot
+	// start without one, and says so clearly.
 	switch {
 	case c.Security.JWTSecret.IsZero():
 		if c.Env.IsProduction() {
