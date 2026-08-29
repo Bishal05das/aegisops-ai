@@ -14,6 +14,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -25,6 +26,9 @@ import (
 	"github.com/bishal05das/aegisops-ai/internal/api"
 	"github.com/bishal05das/aegisops-ai/internal/api/handlers"
 	"github.com/bishal05das/aegisops-ai/internal/config"
+	"github.com/bishal05das/aegisops-ai/internal/database"
+	"github.com/bishal05das/aegisops-ai/internal/database/migrate"
+	"github.com/bishal05das/aegisops-ai/internal/database/migrations"
 	"github.com/bishal05das/aegisops-ai/internal/preflight"
 	"github.com/bishal05das/aegisops-ai/internal/version"
 	"github.com/bishal05das/aegisops-ai/pkg/logger"
@@ -104,11 +108,28 @@ func run(args []string) int {
 	defer stop()
 
 	// ---- composition root ---------------------------------------------------
-	// Phase 3+ constructs the Postgres pool, Redis client, event bus and LLM
-	// provider here and passes them in through Deps. Everything below is
+	// The one place that knows which concrete adapters are wired in. Phase 5+
+	// adds the event bus and LLM provider here; everything below is
 	// interface-typed, so those additions do not ripple outward.
+	db, err := database.Open(ctx, database.FromAppConfig(cfg), log)
+	if err != nil {
+		log.Error("failed to connect to postgres", "error", err, "target", cfg.Postgres.Safe())
+		return exitFailure
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			log.Warn("error closing the postgres pool", "error", err)
+		}
+	}()
+
+	schemaVersion, migErr := applyMigrations(ctx, db, cfg, log)
+	if migErr != nil {
+		log.Error("schema is not usable", "error", migErr)
+		return exitFailure
+	}
+
 	health := handlers.NewHealth(
-		handlers.WithChecks(dependencyChecks(cfg)...),
+		handlers.WithChecks(dependencyChecks(cfg, db, schemaVersion)...),
 	)
 
 	server := api.NewServer(api.Deps{
@@ -129,20 +150,58 @@ func run(args []string) int {
 
 // dependencyChecks builds the readiness probes for the backing services.
 //
-// It reuses the Phase 1 preflight package rather than duplicating health logic.
-// The probes are protocol handshakes, not TCP connects, so readiness reflects
-// "the dependency is genuinely usable" rather than "a port is open" — which is
-// the distinction that keeps a pod out of rotation when it should be.
+// Reuses the Phase 1 preflight package rather than duplicating health logic. The
+// probes are protocol handshakes and real queries, not TCP connects, so
+// readiness reflects "the dependency is genuinely usable" rather than "a port is
+// open" — which is the distinction that keeps a broken pod out of rotation.
 //
-// Only Postgres and Redis are checked. RabbitMQ is deliberately excluded until
-// Phase 5 wires it in: a readiness probe must fail only on dependencies the
-// process actually needs to serve traffic, or a deploy stalls on something
-// irrelevant.
-func dependencyChecks(cfg *config.Config) []preflight.Check {
+// PoolCheck supersedes the TCP-level Postgres probe here: what readiness needs
+// to know is whether *our pool* can serve a query, not whether something is
+// listening on 5434.
+//
+// RabbitMQ and the LLM are deliberately absent until Phase 5 and Phase 8 wire
+// them in. A readiness probe must fail only on dependencies the process needs to
+// serve traffic; failing on something unused stalls a deploy for no reason.
+func dependencyChecks(cfg *config.Config, db *sql.DB, schemaVersion int) []preflight.Check {
 	return []preflight.Check{
-		preflight.NewPostgresCheck(cfg.Postgres.Addr()),
+		database.NewPoolCheck(db),
+		database.NewMigrationCheck(db, schemaVersion),
 		preflight.NewRedisCheck(cfg.Redis.Addr(), cfg.Redis.Password.Reveal()),
 	}
+}
+
+// applyMigrations brings the schema up to date and returns the version this
+// build expects.
+//
+// Migrating on startup is safe here because the runner holds a Postgres advisory
+// lock: several replicas starting at once serialise rather than race, and the
+// losers find nothing to do. Combined with an embedded migration set, a container
+// carries its own schema and needs no separate deployment step to stay in step
+// with the image.
+//
+// AEGIS_DB_AUTO_MIGRATE=false disables it for deployments that prefer an
+// explicit migration job — in which case the schema check below still refuses to
+// serve traffic against an out-of-date database.
+func applyMigrations(ctx context.Context, db *sql.DB, cfg *config.Config, log *slog.Logger) (int, error) {
+	loaded, err := migrate.Load(migrations.FS, migrations.Dir)
+	if err != nil {
+		return 0, fmt.Errorf("load migrations: %w", err)
+	}
+	expected := 0
+	if n := len(loaded); n > 0 {
+		expected = loaded[n-1].Version
+	}
+
+	if !cfg.Postgres.AutoMigrate {
+		log.Info("automatic migration is disabled; expecting an external migration job",
+			"expected_schema_version", expected)
+		return expected, nil
+	}
+
+	if err := migrate.New(db, loaded, log).Up(ctx); err != nil {
+		return 0, fmt.Errorf("apply migrations: %w", err)
+	}
+	return expected, nil
 }
 
 // flags holds parsed command-line options.

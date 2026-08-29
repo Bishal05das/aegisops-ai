@@ -95,6 +95,12 @@ type PostgresConfig struct {
 	MaxConns        int
 	MinConns        int
 	ConnMaxLifetime time.Duration
+	// AutoMigrate applies pending migrations on startup. Safe with several
+	// replicas because the runner holds a Postgres advisory lock, so they
+	// serialise rather than race. Disable it where an explicit migration job is
+	// preferred; the readiness schema check still refuses to serve traffic
+	// against an out-of-date database either way.
+	AutoMigrate bool
 }
 
 // DSN renders a libpq connection string.
@@ -250,6 +256,7 @@ func Load(lookup func(string) (string, bool)) (*Config, error) {
 		MaxConns:        l.intVal("AEGIS_PG_MAX_CONNS", 20, 1, 500),
 		MinConns:        l.intVal("AEGIS_PG_MIN_CONNS", 2, 0, 500),
 		ConnMaxLifetime: l.duration("AEGIS_PG_CONN_MAX_LIFETIME", 30*time.Minute, time.Minute, 24*time.Hour),
+		AutoMigrate:     l.boolVal("AEGIS_DB_AUTO_MIGRATE", true),
 	}
 
 	// ---- redis --------------------------------------------------------------
@@ -432,6 +439,7 @@ func (c *Config) LogAttrs() []slog.Attr {
 		slog.String("http_addr", c.HTTP.Addr),
 		slog.String("metrics_addr", c.Observ.MetricsAddr),
 		slog.String("postgres", c.Postgres.Safe()),
+		slog.Bool("db_auto_migrate", c.Postgres.AutoMigrate),
 		slog.String("redis", c.Redis.Addr()),
 		slog.String("eventbus", c.AMQP.Driver),
 		slog.String("amqp", c.AMQP.Safe()),

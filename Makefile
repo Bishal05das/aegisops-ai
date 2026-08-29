@@ -34,15 +34,17 @@ LDFLAGS := -s -w \
 GO       ?= go
 GOFLAGS  ?=
 SVC      ?=
+STEPS    ?= 1
 
 # Kept in lockstep with .github/workflows/ci.yml so local lint == CI lint.
 GOLANGCI_VERSION ?= v2.13.2
 
 .DEFAULT_GOAL := help
 .PHONY: help env gen-secret tidy fmt fmt-check vet lint test test-race cover \
-        build clean run run-check lint-config preflight preflight-json preflight-wait \
+        build clean run run-check lint-config test-integration preflight preflight-json preflight-wait \
         dev-up dev-up-ollama dev-down dev-restart dev-ps dev-logs dev-clean dev-reset \
-        psql redis-cli rabbit-ui ci verify
+        psql redis-cli rabbit-ui ci verify \
+        db-migrate db-status db-rollback db-reset db-audit-verify
 
 # -----------------------------------------------------------------------------
 # Help
@@ -53,7 +55,7 @@ help:
 	@echo "AegisOps AI — $(VERSION)"
 	@echo ""
 	@echo "Environment"
-	@grep -E '^## (env|gen-secret|dev-|preflight|psql|redis-cli|rabbit-ui)' $(MAKEFILE_LIST) \
+	@grep -E '^## (env|gen-secret|dev-|preflight|psql|redis-cli|rabbit-ui|db-)' $(MAKEFILE_LIST) \
 		| sed 's/^## /  /' | sort
 	@echo ""
 	@echo "Code"
@@ -116,6 +118,10 @@ lint-config:
 test:
 	$(GO) test $(GOFLAGS) ./...
 
+## test-integration: run tests that need the live stack (requires make dev-up)
+test-integration:
+	@$(LOAD_ENV) $(GO) test -tags=integration -count=1 -timeout=5m ./tests/integration/...
+
 ## test-race: run unit tests under the race detector
 test-race:
 	$(GO) test -race -count=1 ./...
@@ -169,6 +175,35 @@ preflight-wait:
 ## preflight-json: machine-readable preflight report
 preflight-json:
 	@$(LOAD_ENV) $(GO) run ./cmd/preflight -json
+
+# -----------------------------------------------------------------------------
+# Database
+# -----------------------------------------------------------------------------
+
+## db-migrate: apply every pending migration
+db-migrate:
+	@$(LOAD_ENV) $(GO) run ./cmd/migrate up
+
+## db-status: show which migrations are applied
+db-status:
+	@$(LOAD_ENV) $(GO) run ./cmd/migrate status
+
+## db-rollback: revert the most recent migration(s) — make db-rollback STEPS=1
+db-rollback:
+	@$(LOAD_ENV) $(GO) run ./cmd/migrate down $(STEPS)
+
+## db-reset: drop every migration and re-apply from scratch (destructive)
+db-reset:
+	@printf 'This drops every table and all data. Type "yes" to continue: '; \
+	read ans; [ "$$ans" = "yes" ] || { echo "aborted"; exit 1; }
+	@$(LOAD_ENV) $(GO) run ./cmd/migrate down 99
+	@$(LOAD_ENV) $(GO) run ./cmd/migrate up
+
+## db-audit-verify: recompute the audit ledger's hash chain
+db-audit-verify:
+	@$(LOAD_ENV) $(COMPOSE) exec -T postgres psql -U "$$AEGIS_PG_USER" -d "$$AEGIS_PG_DATABASE" \
+		-c "SELECT count(*) AS entries, min(seq) AS first_seq, max(seq) AS last_seq FROM audit_logs;"
+	@echo "full chain verification: go test -tags=integration -run TestAuditChain ./tests/integration/..."
 
 # -----------------------------------------------------------------------------
 # Development stack
