@@ -67,9 +67,20 @@ func NewServer(deps Deps) *Server {
 		// production like everything else.
 		ErrorLog: slog.NewLogLogger(log.Handler(), slog.LevelWarn),
 
-		// BaseContext makes the listener's context the parent of every request,
-		// so cancelling it during shutdown propagates into in-flight handlers.
-		BaseContext: func(net.Listener) context.Context { return context.Background() },
+		// BaseContext is deliberately left nil (net/http defaults it to
+		// context.Background()).
+		//
+		// The tempting alternative is to root it at Run's context so SIGTERM
+		// propagates into request contexts. That would be actively harmful: it
+		// cancels every in-flight request the instant the signal arrives, so a
+		// handler part-way through an approved remediation is aborted rather
+		// than allowed to finish. Shutdown already gives in-flight work its
+		// grace period *without* cancelling it — that separation is precisely
+		// what makes the drain graceful, and ShutdownGrace is the bound.
+		//
+		// If a future long-running handler needs to know a shutdown has begun so
+		// it can wind down early, that wants a distinct "draining" signal, not
+		// cancellation of the request it is serving.
 	}
 	return s
 }

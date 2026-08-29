@@ -489,6 +489,43 @@ func TestMaxBodyRejectsOnContentLength(t *testing.T) {
 	}
 }
 
+// Regression: this rejection used to go through http.Error, which forces
+// Content-Type text/plain. A client parsing the API's JSON envelope then
+// received a plain-text body that merely looked like JSON.
+func TestMaxBodyRejectionIsGenuineJSON(t *testing.T) {
+	t.Parallel()
+
+	h := httpx.Chain(okHandler, InjectLogger(logger.Discard()), RequestID(), MaxBody(100))
+
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(strings.Repeat("x", 500)))
+	rec := serve(h, req)
+
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+
+	var env struct {
+		Error struct {
+			Code      string `json:"code"`
+			Message   string `json:"message"`
+			RequestID string `json:"request_id"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("body is not valid JSON: %v (%s)", err, rec.Body)
+	}
+	if env.Error.Code != "body_too_large" {
+		t.Errorf("code = %q", env.Error.Code)
+	}
+	if !strings.Contains(env.Error.Message, "100") {
+		t.Errorf("message %q should state the limit", env.Error.Message)
+	}
+	// The rejection must be correlatable like any other error response.
+	if env.Error.RequestID == "" {
+		t.Error("request_id is empty")
+	}
+}
+
 // A client streaming an endless body with no Content-Length must still be
 // stopped — that is what MaxBytesReader adds over io.LimitReader.
 func TestMaxBodyCapsUnknownLengthStreams(t *testing.T) {

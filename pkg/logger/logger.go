@@ -117,10 +117,15 @@ func ParseFormat(s string) (Format, bool) {
 }
 
 // replaceAttr normalises and redacts attributes before encoding.
-func replaceAttr(groups []string, a slog.Attr) slog.Attr {
-	// Only redact at the top level; a group named "params" legitimately holds
-	// arbitrary keys from tool arguments and is redacted by the caller instead.
-	if len(groups) == 0 && isSensitiveKey(a.Key) {
+//
+// Redaction applies at every depth, not just the top level. Grouping is a
+// presentation choice; it says nothing about how sensitive a value is. An
+// earlier version of this function skipped grouped attributes on the theory
+// that callers would redact their own maps first — which meant
+// `log.WithGroup("db").Info(..., "password", pw)` wrote the credential straight
+// to the log. Redacting twice costs nothing; missing once costs a rotation.
+func replaceAttr(_ []string, a slog.Attr) slog.Attr {
+	if isSensitiveKey(a.Key) {
 		return slog.String(a.Key, Redacted)
 	}
 

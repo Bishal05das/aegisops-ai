@@ -180,6 +180,57 @@ func TestSensitiveKeysAreRedacted(t *testing.T) {
 	}
 }
 
+// Regression: redaction used to be skipped for grouped attributes, so
+// log.WithGroup("db").Info(..., "password", pw) wrote the credential verbatim.
+// Grouping is presentation; it must not change secret handling.
+func TestSensitiveKeysAreRedactedInsideGroups(t *testing.T) {
+	t.Parallel()
+
+	log, records := capture(t, slog.LevelDebug)
+
+	log.WithGroup("db").Info("connecting",
+		"host", "postgres.internal",
+		"password", "hunter2",
+	)
+	log.WithGroup("tool").WithGroup("params").Info("executing",
+		"container", "api-7f9",
+		"api_key", "sk-live-abc123",
+	)
+
+	recs := records()
+	if len(recs) != 2 {
+		t.Fatalf("got %d records, want 2", len(recs))
+	}
+
+	db, ok := recs[0]["db"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected a db group, got %T", recs[0]["db"])
+	}
+	if db["password"] != Redacted {
+		t.Errorf("password inside a group = %v, want %q", db["password"], Redacted)
+	}
+	if db["host"] != "postgres.internal" {
+		t.Errorf("benign grouped value altered: %v", db["host"])
+	}
+
+	// Nested groups must be covered too — tool parameters arrive from an LLM
+	// and can carry anything the model read from the environment.
+	tool, ok := recs[1]["tool"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected a tool group, got %T", recs[1]["tool"])
+	}
+	params, ok := tool["params"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected a nested params group, got %T", tool["params"])
+	}
+	if params["api_key"] != Redacted {
+		t.Errorf("api_key in a nested group = %v, want %q", params["api_key"], Redacted)
+	}
+	if params["container"] != "api-7f9" {
+		t.Errorf("benign nested value altered: %v", params["container"])
+	}
+}
+
 func TestIsSensitiveKey(t *testing.T) {
 	t.Parallel()
 

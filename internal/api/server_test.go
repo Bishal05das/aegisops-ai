@@ -429,6 +429,77 @@ func TestShutdownDrainsInFlightRequests(t *testing.T) {
 	}
 }
 
+// The graceful-drain guarantee, asserted directly: a request already in flight
+// when SIGTERM arrives must run to completion AND keep a live context.
+//
+// This is why BaseContext is not rooted at Run's context. Doing so would cancel
+// every in-flight request the instant the signal lands, aborting a handler
+// part-way through an approved remediation — the precise opposite of graceful.
+func TestShutdownDoesNotCancelInFlightRequestContexts(t *testing.T) {
+	t.Parallel()
+
+	addr := freePort(t)
+	srv := newServerOn(t, addr, nil)
+
+	var (
+		ctxErrDuringHandler error
+		completed           = make(chan struct{})
+		started             = make(chan struct{})
+	)
+
+	srv.RegisterTestRoute(http.MethodGet, "/slow", func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		// Long enough that shutdown definitely begins underneath us.
+		time.Sleep(400 * time.Millisecond)
+		ctxErrDuringHandler = r.Context().Err()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"done":true}`))
+		close(completed)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan error, 1)
+	go func() { runDone <- srv.Run(ctx) }()
+
+	waitForListener(t, addr)
+
+	respCh := make(chan int, 1)
+	go func() {
+		resp, err := http.Get("http://" + addr + "/slow")
+		if err != nil {
+			respCh <- -1
+			return
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		respCh <- resp.StatusCode
+	}()
+
+	<-started
+	cancel() // SIGTERM equivalent, while the handler is mid-flight
+
+	select {
+	case status := <-respCh:
+		if status != http.StatusOK {
+			t.Errorf("in-flight request status = %d, want 200 — it was severed by shutdown", status)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("in-flight request never completed")
+	}
+
+	<-completed
+	if ctxErrDuringHandler != nil {
+		t.Errorf("request context was cancelled mid-handler (%v); the drain is not graceful",
+			ctxErrDuringHandler)
+	}
+
+	select {
+	case <-runDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return after the drain")
+	}
+}
+
 // A port conflict must be reported synchronously, before the process announces
 // itself as started — otherwise a supervisor sees a healthy start and a dead
 // service.

@@ -6,6 +6,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/bishal05das/aegisops-ai/internal/api/dto"
+	"github.com/bishal05das/aegisops-ai/pkg/httpx"
+	"github.com/bishal05das/aegisops-ai/pkg/logger"
 )
 
 // Timeout bounds how long a handler may run by attaching a context deadline.
@@ -51,11 +55,17 @@ func MaxBody(limit int64) Middleware {
 			return
 		}
 		if r.ContentLength > limit {
+			// Deliberately not http.Error: it forces Content-Type text/plain,
+			// so a client parsing the API's JSON envelope would receive a
+			// plain-text body that merely looks like JSON. Every response this
+			// API produces, including rejections, must be genuine JSON.
 			w.Header().Set("Connection", "close")
-			http.Error(w,
-				`{"error":{"code":"body_too_large","message":"request body exceeds `+
-					strconv.FormatInt(limit, 10)+` bytes"}}`,
-				http.StatusRequestEntityTooLarge)
+			body := dto.NewError(
+				"body_too_large",
+				"request body exceeds "+strconv.FormatInt(limit, 10)+" bytes",
+				logger.RequestID(r.Context()),
+			)
+			_ = httpx.Respond(w, http.StatusRequestEntityTooLarge, body)
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, limit)

@@ -13,15 +13,25 @@ import (
 //
 // The subtlety worth understanding: wrapping an http.ResponseWriter silently
 // hides the optional interfaces the real one implements — http.Flusher (needed
-// for streaming), http.Hijacker (needed for WebSocket upgrades), io.ReaderFrom
-// (needed for efficient sendfile). Naively wrapping breaks all three.
+// for streaming), http.Hijacker (needed for connection upgrades), io.ReaderFrom
+// (the zero-copy fast path io.Copy takes to reach sendfile).
 //
-// The modern fix is [ResponseRecorder.Unwrap]: since Go 1.20, http.ResponseController
-// walks Unwrap() chains to find the underlying capabilities. Implementing that
-// one method restores every optional behaviour without the combinatorial
-// interface-assertion soup older codebases resort to. Flush and Hijack are still
-// implemented explicitly, because plenty of third-party code type-asserts
-// directly rather than going through ResponseController.
+// [ResponseRecorder.Unwrap] recovers most of that: since Go 1.20,
+// http.ResponseController walks Unwrap() chains to find Flush, Hijack,
+// SetReadDeadline and SetWriteDeadline on the underlying writer, which avoids
+// the combinatorial interface-assertion soup older codebases resort to. Flush
+// and Hijack are additionally implemented outright, because plenty of
+// third-party code type-asserts directly instead of going through
+// ResponseController.
+//
+// What Unwrap does NOT recover is io.ReaderFrom. ResponseController has no
+// method for it, and io.Copy checks for the interface on the concrete value it
+// is handed — which is this wrapper, not the writer underneath. So a handler
+// that io.Copy's a *os.File into the response loses the sendfile fast path and
+// falls back to a buffered copy while this middleware is in the chain. That is
+// an acceptable trade for accurate status and byte accounting on a JSON API
+// that serves no large files; it would not be for a static file server, and a
+// future streaming endpoint should measure before assuming otherwise.
 type ResponseRecorder struct {
 	http.ResponseWriter
 
