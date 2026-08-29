@@ -1,0 +1,27 @@
+# Prometheus scrape configuration for the local AegisOps stack.
+#
+# aegisopsd is expected to run natively on the host during development
+# (`make run`), so it is scraped through host.docker.internal rather than a
+# container DNS name. The target is allowed to be down — Prometheus reports it
+# as `up == 0`, which is itself the first metric this platform cares about.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: aegisops-local
+    env: development
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # AegisOps control plane — Phase 11 exposes the real registry here.
+  - job_name: aegisopsd
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:9091"]
+        labels:
+          service: aegisopsd
+          component: control-plane

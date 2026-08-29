@@ -1,0 +1,232 @@
+# =============================================================================
+# AegisOps AI — local development stack
+#
+# Driven exclusively through the Makefile (make dev-up / dev-down / dev-logs).
+#
+# `name:` is pinned because the project directory contains spaces and an em-dash;
+# leaving Compose to derive the project name from the directory produces an
+# unstable, mangled prefix on volumes and networks.
+#
+# Host ports intentionally avoid this machine's native PostgreSQL (5432, 5433)
+# and native Redis (6379). Inside the aegisops network, services still talk to
+# each other on the standard ports.
+#
+# Ollama is NOT containerised by default: the host already serves qwen2.5:7b on
+# 11434 and duplicating a 4.7 GB model into a container buys nothing while
+# costing GPU passthrough. Use `--profile ollama` if you want it isolated.
+# =============================================================================
+name: aegisops
+
+x-restart: &restart
+  restart: unless-stopped
+
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 17 + pgvector — system of record AND long-term agent memory.
+  # One engine for both so an incident and the embedding of its postmortem can
+  # be written in a single transaction. See docs/adr/0005.
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: aegisops-postgres
+    <<: [*restart, *logging]
+    environment:
+      POSTGRES_USER: ${AEGIS_PG_USER:-aegis}
+      POSTGRES_PASSWORD: ${AEGIS_PG_PASSWORD:-aegis_dev_password}
+      POSTGRES_DB: ${AEGIS_PG_DATABASE:-aegisops}
+      # Deterministic collation so ORDER BY is identical across dev machines.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      - "${AEGIS_PG_PORT:-5434}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./config/postgres/init:/docker-entrypoint-initdb.d:ro
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_preload_libraries=pg_stat_statements"
+      - "-c"
+      - "log_statement=none"
+      - "-c"
+      - "max_connections=100"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${AEGIS_PG_USER:-aegis} -d ${AEGIS_PG_DATABASE:-aegisops}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks: [aegisops]
+
+  # ---------------------------------------------------------------------------
+  # Redis — short-term agent memory: live incident state, agent scratchpads,
+  # distributed locks, idempotency keys. Everything here is expendable.
+  # appendonly is off on purpose: durable state belongs in Postgres.
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7.4-alpine
+    container_name: aegisops-redis
+    <<: [*restart, *logging]
+    ports:
+      - "${AEGIS_REDIS_PORT:-6380}:6379"
+    command:
+      - "redis-server"
+      - "--appendonly"
+      - "no"
+      - "--maxmemory"
+      - "256mb"
+      - "--maxmemory-policy"
+      - "allkeys-lru"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks: [aegisops]
+
+  # ---------------------------------------------------------------------------
+  # RabbitMQ — the event backbone between the agentic layer and the harness.
+  # Chosen over Kafka on a 16 GB workstation: ~150 MB resident vs 2-3 GB, and a
+  # topic exchange is exactly the routing model we need. See docs/adr/0004.
+  # Management UI: http://localhost:15672
+  # ---------------------------------------------------------------------------
+  rabbitmq:
+    image: rabbitmq:4.0-management-alpine
+    container_name: aegisops-rabbitmq
+    <<: [*restart, *logging]
+    environment:
+      RABBITMQ_DEFAULT_USER: ${AEGIS_AMQP_USER:-aegis}
+      RABBITMQ_DEFAULT_PASS: ${AEGIS_AMQP_PASSWORD:-aegis_dev_password}
+    ports:
+      - "${AEGIS_AMQP_PORT:-5672}:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 25s
+    networks: [aegisops]
+
+  # ---------------------------------------------------------------------------
+  # Prometheus — scrapes aegisopsd's /metrics (Phase 11) and its own.
+  # extra_hosts lets it reach a natively-run aegisopsd during development.
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: aegisops-prometheus
+    <<: [*restart, *logging]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
+      - "--web.enable-lifecycle"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks: [aegisops]
+
+  # ---------------------------------------------------------------------------
+  # Grafana — dashboards over Prometheus + Jaeger. Anonymous admin access is
+  # acceptable for a local-only stack and is overridden in deployments/k8s.
+  # ---------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: aegisops-grafana
+    <<: [*restart, *logging]
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health | grep -q ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks: [aegisops]
+
+  # ---------------------------------------------------------------------------
+  # Jaeger — OTLP collector + trace UI. A single agent run fans out across
+  # planner -> tool -> harness -> executor; without distributed tracing that
+  # causal chain is unrecoverable from logs alone.
+  # ---------------------------------------------------------------------------
+  jaeger:
+    image: jaegertracing/all-in-one:1.65.0
+    container_name: aegisops-jaeger
+    <<: [*restart, *logging]
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+      SPAN_STORAGE_TYPE: memory
+    ports:
+      - "16686:16686"   # UI
+      - "4317:4317"     # OTLP gRPC
+      - "4318:4318"     # OTLP HTTP
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:14269/"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks: [aegisops]
+
+  # ---------------------------------------------------------------------------
+  # Optional containerised Ollama — `make dev-up-ollama`.
+  # Off by default; the host install already serves the model.
+  # ---------------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: aegisops-ollama
+    profiles: ["ollama"]
+    <<: [*restart, *logging]
+    ports:
+      - "11435:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    networks: [aegisops]
+
+networks:
+  aegisops:
+    name: aegisops
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
+  rabbitmq-data:
+  prometheus-data:
+  grafana-data:
+  ollama-models:
