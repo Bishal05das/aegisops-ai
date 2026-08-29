@@ -219,12 +219,28 @@ func (r *IncidentRepo) Count(ctx context.Context, f ports.IncidentFilter) (int64
 	return n, nil
 }
 
+// timelineLockClass namespaces the per-incident advisory lock, so it cannot
+// collide with the migration or audit ledger locks.
+const timelineLockClass = 0x41454731 // "AEG1"
+
 // AppendEvent adds one timeline entry, assigning its sequence.
 //
-// The sequence is computed in the same statement as the insert. Reading the max
-// and then inserting would race: two agents appending concurrently would both
-// read the same maximum and one insert would fail on the unique index — or
-// worse, succeed with a duplicate if the index were missing.
+// Appends to one incident are serialised by a per-incident advisory lock, taken
+// for the duration of the transaction. Without it, `max(seq) + 1` is a
+// read-then-write race: the orchestrator runs three agents concurrently in the
+// first wave, they append at the same instant, both compute the same next
+// sequence, and the unique index rejects one.
+//
+// An earlier version returned that conflict and documented "the caller retries".
+// That was a trap, and it cost a real bug: every caller can only retry — there
+// is no other sensible response — so requiring each to write the loop guarantees
+// one of them will not. The result was a timeline with agent.started present for
+// two agents and silently missing for the third, which is exactly the hole that
+// makes a postmortem reach the wrong conclusion.
+//
+// The lock is per incident, so appends to different incidents never contend, and
+// it is transaction-scoped, so it releases on commit or rollback with no
+// explicit unlock and no risk of leaking on a panic.
 func (r *IncidentRepo) AppendEvent(ctx context.Context, ev *incident.Event) error {
 	const op = "postgres.IncidentRepo.AppendEvent"
 
@@ -236,31 +252,67 @@ func (r *IncidentRepo) AppendEvent(ctx context.Context, ev *incident.Event) erro
 		return fmt.Errorf("%s: encode payload: %w", op, err)
 	}
 
-	err = r.exec(ctx).QueryRowContext(ctx, `
-		INSERT INTO incident_events (
-			id, incident_id, seq, type, actor_type, actor_id, actor_name,
-			message, payload, occurred_at
-		)
-		SELECT $1, $2,
-		       COALESCE((SELECT max(seq) FROM incident_events WHERE incident_id = $2), 0) + 1,
-		       $3, $4, $5, $6, $7, $8, $9
-		RETURNING seq`,
-		ev.ID, ev.IncidentID, string(ev.Type), string(ev.ActorType),
-		nullID(ev.ActorID), ev.ActorName, ev.Message, payload, ev.OccurredAt,
-	).Scan(&ev.Seq)
+	write := func(ctx context.Context) error {
+		ex := r.exec(ctx)
 
-	if err != nil {
-		if isUniqueViolation(err) {
-			// Two appends raced past the subselect. The caller retries; the
-			// second attempt reads the now-higher maximum.
-			return fmt.Errorf("%s: %w: concurrent append to incident %s", op, shared.ErrConflict, ev.IncidentID)
+		// Derived from the incident's own bytes, so the lock is per incident.
+		if _, err := ex.ExecContext(ctx,
+			`SELECT pg_advisory_xact_lock($1, $2)`,
+			timelineLockClass, incidentLockKey(ev.IncidentID)); err != nil {
+			return fmt.Errorf("%s: acquire timeline lock: %w", op, err)
 		}
-		if sqlState(err) == codeForeignKeyViolation {
-			return fmt.Errorf("%s: %w: incident %s", op, shared.ErrNotFound, ev.IncidentID)
+
+		err := ex.QueryRowContext(ctx, `
+			INSERT INTO incident_events (
+				id, incident_id, seq, type, actor_type, actor_id, actor_name,
+				message, payload, occurred_at
+			)
+			SELECT $1, $2,
+			       COALESCE((SELECT max(seq) FROM incident_events WHERE incident_id = $2), 0) + 1,
+			       $3, $4, $5, $6, $7, $8, $9
+			RETURNING seq`,
+			ev.ID, ev.IncidentID, string(ev.Type), string(ev.ActorType),
+			nullID(ev.ActorID), ev.ActorName, ev.Message, payload, ev.OccurredAt,
+		).Scan(&ev.Seq)
+
+		if err != nil {
+			if isUniqueViolation(err) {
+				// Should be unreachable now that appends are serialised, but
+				// kept: a duplicate event ID would also land here, and silently
+				// treating that as success would hide a real bug.
+				return fmt.Errorf("%s: %w: duplicate timeline entry for incident %s",
+					op, shared.ErrConflict, ev.IncidentID)
+			}
+			if sqlState(err) == codeForeignKeyViolation {
+				return fmt.Errorf("%s: %w: incident %s", op, shared.ErrNotFound, ev.IncidentID)
+			}
+			return fmt.Errorf("%s: %w", op, err)
 		}
-		return fmt.Errorf("%s: %w", op, err)
+		return nil
 	}
-	return nil
+
+	// A transaction-scoped lock needs a transaction. If the caller already
+	// opened one — appending alongside the incident insert, for instance — this
+	// joins it rather than nesting.
+	if _, inTx := txFrom(ctx); inTx {
+		return write(ctx)
+	}
+	return NewTxManager(r.db).WithinTx(ctx, write)
+}
+
+// incidentLockKey derives a stable int32 advisory-lock key from an incident ID.
+//
+// Truncating 128 bits to 32 means distinct incidents can share a key. That is
+// harmless: a collision serialises two unrelated timelines for the duration of
+// one insert, costing a little concurrency and no correctness. The alternative,
+// a wider key, would need the single-argument lock form and give up the class
+// namespace that keeps these locks separate from the migration and audit ones.
+func incidentLockKey(id shared.ID) int32 {
+	bits := uint32(id[0])<<24 | uint32(id[1])<<16 | uint32(id[2])<<8 | uint32(id[3])
+	// The wrap to negative values is intended: pg_advisory_xact_lock takes a
+	// signed key and every one of the 2^32 values is equally valid as a lock
+	// identity. Only distinctness matters here, not magnitude.
+	return int32(bits) //nolint:gosec // G115: deliberate truncation, see above
 }
 
 // Events returns an incident's timeline in ascending sequence order.

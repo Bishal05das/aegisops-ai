@@ -255,8 +255,66 @@ go run ./cmd/preflight -json                    # machine-readable
 go run ./cmd/preflight -wait 60s                # retry while the stack boots
 ```
 
-> Incident creation, agent execution and the approval workflow are documented as
-> each phase lands (Phases 5–8).
+### Watching an investigation
+
+Reporting an incident returns **202 Accepted**, not 201: the row exists, but the
+investigation it triggers has not happened yet. The seven agents run in the
+background; the timeline is how you watch them work.
+
+```bash
+TOKEN=$(curl -s -X POST localhost:8080/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"admin@aegisops.local","password":"..."}' | jq -r .access_token)
+
+# Report an incident -> 202, with a Location header
+ID=$(curl -s -X POST localhost:8080/api/v1/incidents \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"title":"api-worker is OOMKilled","severity":"high",
+       "source":"alert","service":"api-worker","environment":"production"}' | jq -r .id)
+
+# Watch the agents work
+curl -s "localhost:8080/api/v1/incidents/$ID/timeline" \
+  -H "Authorization: Bearer $TOKEN" | jq -r '.events[] | "\(.seq)  \(.type)  \(.actor_name)"'
+
+# What each agent concluded, and how long it took
+curl -s "localhost:8080/api/v1/incidents/$ID/tasks" -H "Authorization: Bearer $TOKEN" | jq .
+
+# The roster — note that exactly one agent has can_mutate: true
+curl -s localhost:8080/api/v1/agents -H "Authorization: Bearer $TOKEN" \
+  | jq -r '.agents[] | "\(.name)  can_mutate=\(.can_mutate)"'
+```
+
+A completed investigation looks like this — note seq 7–10, where the first wave
+runs concurrently:
+
+```
+ 1  incident.detected
+ 2  agent.started      incident_manager
+ 3  agent.completed    incident_manager
+ 4  agent.started      security
+ 5  agent.completed    security
+ 6  tool.requested     security
+ 7  agent.started      log_analysis     ┐
+ 8  agent.started      monitoring       │ concurrent: no shared dependency,
+ 9  agent.completed    log_analysis     │ and each waits on a model call
+10  agent.completed    monitoring       ┘
+11  tool.requested     monitoring
+...
+16  agent.started      diagnosis        ← needs the evidence above
+18  incident.diagnosed diagnosis
+19  agent.started      action           ← needs the diagnosis
+21  tool.requested     action           ← an INTENT. Nothing executed it.
+22  agent.started      documentation
+24  incident.note_added documentation
+```
+
+That `tool.requested` at seq 21 is the whole design in one line. The Action agent
+proposed `docker.restart_container`; it has no client, no credentials and no
+network with which to perform it. Phase 6 gives the harness the job of deciding
+whether that proposal ever becomes an effect.
+
+> The approval workflow and real tool execution land in Phases 6–7. Until then,
+> intents are published and observed, and nothing touches infrastructure.
 
 ---
 
@@ -327,12 +385,12 @@ internal/
   ports/         interfaces the core requires of the outside world
   api/           HTTP driving adapter (raw net/http)
   services/      application use cases
-  agents/        the seven agents + orchestrator
+  agents/        the seven agents + orchestrator        ✅ Phase 5
   harness/       registry · permission · policy · approval · audit
   tools/         docker · kubernetes · linux · database · monitoring · git
   llm/           provider port + ollama · llamacpp
   memory/        shortterm (redis) · longterm (pgvector)
-  events/        bus port + inproc · rabbitmq
+  events/        bus port + inproc · rabbitmq           ✅ Phase 5 (inproc)
   repository/    postgres implementations
   database/      pool + migrations
   security/      jwt · rbac · ratelimit · secrets
@@ -385,6 +443,14 @@ vector performance this system will not need for years.
 guardrails made of tokens fail the same way the model fails. The mitigation has
 to live in a different layer.
 
+**[Why a fixed agent graph, not a model-planned one?](docs/adr/0010-event-driven-agent-orchestration.md)**
+— The obvious "agentic" design lets the model decide what runs next. That is
+exactly what makes prompt injection powerful: a model that chooses its own next
+step can be argued into choosing badly by a log line it was asked to read. The
+graph here is fixed in code, so injection can change what one agent *concludes*
+but never what *runs* — and the harness still refuses to act on the conclusion
+unchecked.
+
 **[Why a typed error taxonomy?](docs/adr/0007-error-taxonomy.md)** — An error
 leaving a repository has two audiences with opposite needs: the operator wants
 the driver message, the caller must never see it. `errs.Error` carries both and
@@ -402,8 +468,8 @@ in the log.
 | 2 | HTTP server, configuration, logging, error handling | ✅ |
 | 3 | PostgreSQL layer, migrations, repository pattern | ✅ |
 | 4 | Authentication (JWT) and RBAC | ✅ |
-| 5 | Agent orchestration engine | ⏳ next |
-| 6 | Harness engine | |
+| 5 | Agent orchestration engine | ✅ |
+| 6 | Harness engine | ⏳ next |
 | 7 | Tool ecosystem | |
 | 8 | Local LLM integration | |
 | 9 | Memory system | |

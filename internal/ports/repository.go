@@ -93,9 +93,14 @@ type IncidentRepository interface {
 	List(ctx context.Context, f IncidentFilter, p Page) (PageResult[*incident.Incident], error)
 	Count(ctx context.Context, f IncidentFilter) (int64, error)
 
-	// AppendEvent adds one entry to the incident's timeline, assigning Seq
-	// inside the same transaction. Computing the sequence in application code
-	// would race between concurrent agents.
+	// AppendEvent adds one entry to the incident's timeline, assigning Seq.
+	//
+	// Implementations must serialise concurrent appends to the same incident.
+	// The orchestrator runs three agents at once in its first wave and they
+	// append simultaneously; an implementation that returned a conflict here
+	// would require every caller to write a retry loop, and the one that forgot
+	// would silently drop timeline entries — leaving a gap that reads as "this
+	// agent never ran".
 	AppendEvent(ctx context.Context, ev *incident.Event) error
 
 	// Events returns the timeline in ascending sequence order.

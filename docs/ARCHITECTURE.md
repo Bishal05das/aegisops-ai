@@ -117,6 +117,49 @@ narrow prompt, and — critically — a narrow permission set in the harness.
 Note the shape: **six of seven agents can only read.** Exactly one agent can
 propose a mutation, and its proposals go through the policy engine.
 
+#### Dispatch order (Phase 5)
+
+The graph is fixed in code, not chosen by a model:
+
+```
+                    incident_manager          (plan)
+                           │
+        ┌──────────────────┼──────────────────┐
+   monitoring        log_analysis         security      ← concurrent
+        └──────────────────┼──────────────────┘
+                       diagnosis                        ← needs the evidence
+                           │
+                        action                          ← needs a diagnosis
+                           │
+                     documentation                      ← needs everything
+```
+
+The first wave is concurrent because its members share no dependency and each
+waits on a model call; running them in sequence would triple the time to a
+diagnosis. The tail is sequential because each step needs the one before it.
+
+Agents may *suggest* follow-up work through `Output.NextAgents`, but the
+orchestrator decides. An agent that could schedule itself could loop forever —
+and a model that chooses its own next step can be argued into choosing badly by
+a log line it was asked to read. See [ADR 0010](adr/0010-event-driven-agent-orchestration.md).
+
+**The evidence floor.** Diagnosis requires monitoring evidence and refuses
+without it. Log analysis failing is tolerated — a cluster that will not serve
+logs is a common failure mode, and refusing to diagnose because of it would make
+the system useless exactly when it is needed. Losing all telemetry escalates
+instead: a diagnosis with no metrics is guesswork, and guesswork is what must
+never reach the Action agent.
+
+#### What an agent can do
+
+`Agent.Execute` returns an `Output`. Its most powerful field is
+`[]*harness.ToolCallRequest` — a struct with no methods that act, no client, no
+credentials, no network. **An agent describes an action; it cannot take one.**
+The orchestrator publishes each request as `tool.requested` and stops. There is
+no execution path in `internal/agents`.
+
+---
+
 ### 4.2 Harness layer — `internal/harness`
 
 Five components, evaluated in a fixed order. Each one can veto.
@@ -399,6 +442,7 @@ See [ADR 0007](adr/0007-error-taxonomy.md).
 | [0007](adr/0007-error-taxonomy.md) | Errors carry two audiences |
 | [0008](adr/0008-database-sql-with-pgx.md) | `database/sql` + pgx; hand-written migrations |
 | [0009](adr/0009-authentication-and-rbac.md) | Hand-written JWT, argon2id, rotating refresh tokens |
+| [0010](adr/0010-event-driven-agent-orchestration.md) | Event-driven orchestration over a fixed agent graph |
 
 ---
 
@@ -410,7 +454,7 @@ See [ADR 0007](adr/0007-error-taxonomy.md).
 | 2 | HTTP server, config, logging, errors | ✅ complete |
 | 3 | Postgres layer, migrations, repositories | ✅ complete |
 | 4 | JWT auth, RBAC | ✅ complete |
-| 5 | Agent orchestration engine | pending |
+| 5 | Agent orchestration engine | ✅ complete |
 | 6 | Harness engine | pending |
 | 7 | Tool ecosystem | pending |
 | 8 | Local LLM integration | pending |
