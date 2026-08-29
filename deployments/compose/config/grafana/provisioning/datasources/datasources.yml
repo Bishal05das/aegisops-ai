@@ -1,0 +1,26 @@
+# Datasources are provisioned as code so a fresh `make dev-up` yields a
+# fully wired Grafana with no manual clicking.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s
+      httpMethod: POST
+
+  - name: Jaeger
+    type: jaeger
+    access: proxy
+    url: http://jaeger:16686
+    editable: false
+    jsonData:
+      # Lets a trace span jump straight to the metrics of the service that
+      # emitted it — the exit-to-metrics path an SRE actually uses.
+      tracesToMetrics:
+        datasourceUid: prometheus

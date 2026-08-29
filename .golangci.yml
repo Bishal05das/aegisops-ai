@@ -1,0 +1,83 @@
+# golangci-lint v2 configuration.
+#
+# Philosophy: this codebase executes actions against real infrastructure, so the
+# linters that matter most are the ones catching silently-ignored errors, leaked
+# resources and unchecked context propagation. Style linters are kept minimal —
+# gofmt settles formatting arguments, and nothing else needs to.
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    # --- correctness ---------------------------------------------------------
+    - errcheck        # an ignored error is how a "successful" remediation silently fails
+    - govet
+    - staticcheck
+    - ineffassign
+    - unused
+    - bodyclose       # a leaked HTTP body leaks a connection; we hold long-lived clients
+    - rowserrcheck    # database/sql rows.Err() is trivially forgotten and hides truncation
+    - sqlclosecheck
+    - nilerr
+    - errorlint       # enforces %w and errors.Is/As over string comparison
+    - contextcheck    # every infra call must inherit a cancellable context
+    - noctx           # no HTTP request without a context
+
+    # --- security ------------------------------------------------------------
+    - gosec
+    - bidichk
+
+    # --- maintainability -----------------------------------------------------
+    - revive
+    - misspell
+    - unconvert
+    - wastedassign
+    - copyloopvar
+    - predeclared
+    - durationcheck
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: false
+    govet:
+      enable-all: true
+      disable:
+        # Struct layout is optimised for readability here; these are config and
+        # domain types, not hot-loop allocations.
+        - fieldalignment
+    gosec:
+      excludes:
+        - G104  # duplicates errcheck
+    revive:
+      rules:
+        - name: exported
+          arguments: ["checkPrivateReceivers"]
+        - name: package-comments
+        - name: error-strings
+        - name: error-naming
+        - name: context-as-argument
+        - name: indent-error-flow
+
+  exclusions:
+    generated: lax
+    rules:
+      # Tests deliberately ignore errors on fixture servers and use weak RNG.
+      - path: _test\.go
+        linters: [errcheck, gosec, noctx, bodyclose]
+      # Migrations are generated SQL wrappers.
+      - path: internal/database/migrations/
+        linters: [revive]
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/bishal05das/aegisops-ai
