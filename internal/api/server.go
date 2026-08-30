@@ -51,6 +51,9 @@ type Deps struct {
 
 	// Incidents serves the incident and agent endpoints.
 	Incidents *handlers.Incidents
+
+	// Harness serves the approval queue, the rule surface and the ledger.
+	Harness *handlers.Harness
 }
 
 // NewServer assembles the router, middleware stack and http.Server.
@@ -196,6 +199,34 @@ func (s *Server) buildRouter(deps Deps) *httpx.Router {
 
 		v1.Get("/agents", deps.Incidents.ListAgents,
 			authed, middleware.RequirePermission(rbac.PermAgentRead))
+	}
+
+	if deps.Harness != nil && deps.TokenVerifier != nil {
+		authed := middleware.RequireAuth(deps.TokenVerifier)
+
+		// The approval queue. Reading it needs approval:read; ruling on an entry
+		// needs authority for that entry's *risk tier*, which cannot be
+		// expressed as a route-level permission — a route cannot know whether
+		// the request behind {id} is medium or high risk. So the route requires
+		// only the ability to see the queue, and the harness performs the real
+		// authority check against the loaded request. See ADR 0011.
+		v1.Get("/approvals", deps.Harness.ListPending,
+			authed, middleware.RequirePermission(rbac.PermApprovalRead))
+		v1.Post("/approvals/{id}/decide", deps.Harness.Decide,
+			authed, middleware.RequirePermission(rbac.PermApprovalRead))
+
+		v1.Get("/tool-calls", deps.Harness.ListToolCalls,
+			authed, middleware.RequirePermission(rbac.PermApprovalRead))
+		v1.Get("/tool-calls/{id}", deps.Harness.GetToolCall,
+			authed, middleware.RequirePermission(rbac.PermApprovalRead))
+
+		v1.Get("/harness/rules", deps.Harness.Rules,
+			authed, middleware.RequirePermission(rbac.PermPolicyRead))
+
+		v1.Get("/audit", deps.Harness.ListAudit,
+			authed, middleware.RequirePermission(rbac.PermAuditRead))
+		v1.Get("/audit/verify", deps.Harness.VerifyAudit,
+			authed, middleware.RequirePermission(rbac.PermAuditVerify))
 	}
 
 	// JSON for 404 and 405 rather than net/http's text defaults, so clients

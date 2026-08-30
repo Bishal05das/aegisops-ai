@@ -198,6 +198,56 @@ faithfully as executions.** "The AI tried to drop a table and was blocked" is
 the single most valuable line this system can produce, and a design that only
 logs successful actions would throw it away.
 
+In the implementation the write is a `defer` rather than a call repeated at each
+return, so an early return added in future cannot skip it.
+
+#### Deny by default, at every gate (Phase 6)
+
+An action with no matching allow rule is refused. An action with no policy is
+refused. An unrecognised risk tier is refused. An unrecognised autonomy ceiling
+grants no autonomy at all.
+
+The consequence, stated plainly: **a tool added tomorrow is unusable by every
+agent until someone writes it a permission row and a policy row.** That is the
+correct direction of failure — the opposite puts the burden of safety on memory.
+
+#### Approval authority
+
+| | |
+|---|---|
+| **Rejecting** | needs no authority. Stopping an action is safe, and requiring seniority to say "no" would strand a bad remediation in the queue while a junior responder goes looking for someone. |
+| **Approving low/medium** | operator or admin |
+| **Approving high** | admin only |
+| **Approving forbidden** | *nobody*, ever. Three independent layers enforce it, and it takes removing all three to break the property. |
+
+The approver's role is read from the database, not the JWT: a token is a snapshot
+of who someone was when it was issued, and revocation should take effect on the
+next action rather than the next login.
+
+Requests expire after `AEGIS_HARNESS_APPROVAL_TIMEOUT` (30m default). Expiry is a
+safety control — an approval queue without it lets a restart proposed during
+Tuesday's outage be approved on Friday, against a system that has since changed.
+Expiry is its own outcome, so a postmortem can tell *"we decided not to"* from
+*"nobody looked"*.
+
+#### The autonomy ceiling
+
+`AEGIS_HARNESS_MAX_AUTO_RISK` names the riskiest action executed *without* asking
+a human. Above it, an action is **escalated, not refused** — refusing would stop
+an operator authorising a rollback they want. `none` means no autonomy at all.
+Forbidden sits outside the dial entirely: no setting reaches it.
+
+#### Execution
+
+Dry-run by default (`AEGIS_HARNESS_DRY_RUN`). `dry_run` is stored separately from
+`status`, so a query can distinguish "this deployment never executes anything"
+from "this call was skipped". Going live is a deliberate act and is logged at
+`WARN`.
+
+Phase 6 registers the Phase 7 tool *declarations* backed by an inert
+implementation that refuses to run outside dry-run — so a descriptor left inert
+by mistake produces a recorded error, never a synthetic success.
+
 ---
 
 ## 5. Incident lifecycle
@@ -443,6 +493,7 @@ See [ADR 0007](adr/0007-error-taxonomy.md).
 | [0008](adr/0008-database-sql-with-pgx.md) | `database/sql` + pgx; hand-written migrations |
 | [0009](adr/0009-authentication-and-rbac.md) | Hand-written JWT, argon2id, rotating refresh tokens |
 | [0010](adr/0010-event-driven-agent-orchestration.md) | Event-driven orchestration over a fixed agent graph |
+| [0011](adr/0011-harness-engine.md) | Five gates, one ledger: how the harness decides |
 
 ---
 
@@ -455,7 +506,7 @@ See [ADR 0007](adr/0007-error-taxonomy.md).
 | 3 | Postgres layer, migrations, repositories | ✅ complete |
 | 4 | JWT auth, RBAC | ✅ complete |
 | 5 | Agent orchestration engine | ✅ complete |
-| 6 | Harness engine | pending |
+| 6 | Harness engine | ✅ complete |
 | 7 | Tool ecosystem | pending |
 | 8 | Local LLM integration | pending |
 | 9 | Memory system | pending |

@@ -34,6 +34,7 @@ import (
 	domainagent "github.com/bishal05das/aegisops-ai/internal/domain/agent"
 	"github.com/bishal05das/aegisops-ai/internal/domain/shared"
 	"github.com/bishal05das/aegisops-ai/internal/events/inproc"
+	"github.com/bishal05das/aegisops-ai/internal/harness"
 	"github.com/bishal05das/aegisops-ai/internal/ports"
 	"github.com/bishal05das/aegisops-ai/internal/preflight"
 	"github.com/bishal05das/aegisops-ai/internal/repository/postgres"
@@ -41,6 +42,7 @@ import (
 	"github.com/bishal05das/aegisops-ai/internal/security/ratelimit"
 	"github.com/bishal05das/aegisops-ai/internal/security/token"
 	"github.com/bishal05das/aegisops-ai/internal/services"
+	"github.com/bishal05das/aegisops-ai/internal/tools"
 	"github.com/bishal05das/aegisops-ai/internal/version"
 	"github.com/bishal05das/aegisops-ai/pkg/logger"
 )
@@ -216,6 +218,7 @@ func run(args []string) int {
 		Agents:    roster,
 		Incidents: incidentRepo,
 		Tasks:     taskRepo,
+		Calls:     postgres.NewToolCallRepo(db),
 		Bus:       bus,
 		Logger:    log,
 	})
@@ -230,6 +233,72 @@ func run(args []string) int {
 			log.Warn("investigations did not stop cleanly", "error", err)
 		}
 	}()
+
+	// ---- the harness --------------------------------------------------------
+	//
+	// Built after the orchestrator because it subscribes to what the
+	// orchestrator publishes, and before the API because the API serves its
+	// approval queue. This is the only place in the process that holds a tool
+	// executor.
+	toolRegistry := harness.NewRegistry()
+	for _, desc := range tools.Catalog() {
+		// Phase 6 registers the declarations backed by an inert implementation.
+		// Phase 7 swaps the backing without touching a descriptor.
+		if err := toolRegistry.Register(harness.NewNoopTool(desc)); err != nil {
+			log.Error("could not register a tool", "tool", desc.Name, "error", err)
+			return exitFailure
+		}
+	}
+
+	policyRepo := postgres.NewPolicyRepo(db)
+	clock := shared.SystemClock{}
+	permissionEngine := harness.NewPermissionEngine(policyRepo, clock, 0)
+	policyEngine := harness.NewPolicyEngine(policyRepo, clock, 0, cfg.Harness.MaxAutoRisk)
+
+	// Reconcile the registered tools against the policy table before serving.
+	//
+	// A mutating action tiered as low risk would execute automatically, and a
+	// registered action with no policy cannot run at all. Neither is visible by
+	// reading either source alone, so the mismatch is surfaced at startup rather
+	// than the first time an agent proposes the action.
+	problems, reconcileErr := policyEngine.ReconcileTools(ctx, toolRegistry)
+	if reconcileErr != nil {
+		log.Error("could not reconcile tools against policy", "error", reconcileErr)
+		return exitFailure
+	}
+	for _, problem := range problems {
+		log.Warn("tool/policy mismatch", "detail", problem)
+	}
+
+	executor := harness.NewExecutor(harness.ExecutorConfig{
+		Registry: toolRegistry, Clock: clock, Live: !cfg.Harness.DryRun,
+	})
+	approvalGate := harness.NewApprovalGate(clock, cfg.Harness.ApprovalTimeout)
+	toolCallRepo := postgres.NewToolCallRepo(db)
+
+	theHarness := harness.New(harness.Deps{
+		Registry: toolRegistry, Permission: permissionEngine, Policy: policyEngine,
+		Approval: approvalGate, Executor: executor,
+		Calls: toolCallRepo, Audit: audit, Incidents: incidentRepo, Agents: agentRepo,
+		Tx: txm, Bus: bus, Clock: clock, Logger: log,
+	})
+	if err := theHarness.Start(ctx); err != nil {
+		log.Error("could not start the harness", "error", err)
+		return exitFailure
+	}
+
+	if !cfg.Harness.DryRun {
+		// Loud on purpose. This is the line that says the system can change
+		// infrastructure, and it should be impossible to miss in a log.
+		log.Warn("LIVE EXECUTION ENABLED — approved tool calls will change real infrastructure",
+			"max_auto_risk", string(policyEngine.Ceiling()))
+	}
+
+	// Sweep lapsed approvals. Without this the queue accumulates stale
+	// proposals and an operator loses the ability to tell "waiting for me" from
+	// "waiting since Tuesday".
+	stopSweeper := startApprovalSweeper(ctx, theHarness, log)
+	defer stopSweeper()
 
 	incidentSvc := services.NewIncidentService(services.IncidentDeps{
 		Incidents: incidentRepo,
@@ -252,7 +321,13 @@ func run(args []string) int {
 			handlers.WithLoginLimiter(loginLimiter),
 			handlers.WithMaxBodyBytes(cfg.HTTP.MaxBodyBytes),
 		),
-		Incidents:     handlers.NewIncidents(incidentSvc, agentRepo, cfg.HTTP.MaxBodyBytes),
+		Incidents: handlers.NewIncidents(incidentSvc, agentRepo, cfg.HTTP.MaxBodyBytes),
+		Harness: handlers.NewHarness(
+			services.NewApprovalService(theHarness, toolCallRepo, users),
+			services.NewRuleService(permissionEngine, policyEngine, toolRegistry),
+			services.NewAuditService(audit),
+			approvalGate.TTL(), cfg.Harness.DryRun, cfg.HTTP.MaxBodyBytes,
+		),
 		TokenVerifier: verifier,
 		RateLimiter:   apiLimiter,
 	})
@@ -265,6 +340,39 @@ func run(args []string) int {
 
 	log.Info("aegisopsd stopped")
 	return exitOK
+}
+
+// approvalSweepInterval is how often lapsed approvals are swept.
+//
+// A minute is frequent enough that an expired request does not sit in the queue
+// looking actionable, and infrequent enough to be invisible in load.
+const approvalSweepInterval = time.Minute
+
+// startApprovalSweeper expires stale approval requests on a ticker.
+func startApprovalSweeper(ctx context.Context, h *harness.Harness, log *slog.Logger) func() {
+	sweepCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(approvalSweepInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-sweepCtx.Done():
+				return
+			case <-ticker.C:
+				if _, err := h.ExpirePending(sweepCtx); err != nil {
+					log.Warn("the approval sweep failed", "error", err)
+				}
+			}
+		}
+	}()
+
+	return func() {
+		cancel()
+		<-done
+	}
 }
 
 // dependencyChecks builds the readiness probes for the backing services.

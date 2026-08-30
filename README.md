@@ -313,8 +313,53 @@ proposed `docker.restart_container`; it has no client, no credentials and no
 network with which to perform it. Phase 6 gives the harness the job of deciding
 whether that proposal ever becomes an effect.
 
-> The approval workflow and real tool execution land in Phases 6–7. Until then,
-> intents are published and observed, and nothing touches infrastructure.
+### The approval queue
+
+That `tool.requested` at seq 21 now has a subscriber. The harness runs it through
+five gates and records every outcome — including the refusals.
+
+```bash
+# What the agents proposed, and what the harness did about it
+curl -s localhost:8080/api/v1/tool-calls -H "Authorization: Bearer $TOKEN" \
+  | jq -r '.tool_calls[] | "\(.call)  \(.decision)  risk=\(.risk // "-")"'
+
+# The operator's work queue: proposals waiting on a human
+curl -s localhost:8080/api/v1/approvals -H "Authorization: Bearer $TOKEN" \
+  | jq -r '.tool_calls[] | "\(.id)\n  \(.call) (\(.risk))\n  the agent says: \(.reason)"'
+
+# Approve one. A note is mandatory — it is the only artefact a postmortem gets.
+curl -s -X POST "localhost:8080/api/v1/approvals/$CALL_ID/decide" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"decision":"approve","note":"metrics confirm the memory leak"}' | jq .
+
+# The whole decision surface in one document: matrix, policies, tools, ceiling
+curl -s localhost:8080/api/v1/harness/rules -H "Authorization: Bearer $TOKEN" | jq .
+
+# The ledger, and proof it has not been edited
+curl -s localhost:8080/api/v1/audit -H "Authorization: Bearer $TOKEN" \
+  | jq -r '.entries[] | "\(.seq)  \(.action)  \(.outcome)"'
+curl -s localhost:8080/api/v1/audit/verify -H "Authorization: Bearer $TOKEN" | jq .
+```
+
+**What the gates refuse**, and why each refusal is a different fact:
+
+| The agent asks for | Decision | Because |
+|---|---|---|
+| `docker.become_root` | `denied_unknown_tool` | the model invented an action |
+| `docker.restart_container` with `container: "api; rm -rf /"` | `denied_invalid_params` | the value is not a container name |
+| `docker.restart_container`, asked by the Monitoring agent | `denied_permission` | six of seven agents are read-only |
+| `database.drop_table` | `denied_permission` → `denied_policy` | refused twice, independently |
+| `docker.restart_container`, asked by the Action agent | `awaiting_approval` | medium risk; a human decides |
+
+The fourth row is the one worth dwelling on. `database.drop_table` is a
+*declared* action — the catalog names it deliberately, so the ledger records that
+the model asked for something real and destructive rather than that it invented a
+word. Those two entries mean very different things about whether the model has
+drifted.
+
+> Tools are declared but not implemented until Phase 7. Executions run in dry-run
+> (`AEGIS_HARNESS_DRY_RUN=true`), and an unimplemented tool asked to run live
+> **fails loudly** rather than reporting a success that never happened.
 
 ---
 
@@ -386,8 +431,9 @@ internal/
   api/           HTTP driving adapter (raw net/http)
   services/      application use cases
   agents/        the seven agents + orchestrator        ✅ Phase 5
-  harness/       registry · permission · policy · approval · audit
+  harness/       registry · permission · policy · approval · audit  ✅ Phase 6
   tools/         docker · kubernetes · linux · database · monitoring · git
+                 ✅ Phase 6 declares the schemas; Phase 7 implements them
   llm/           provider port + ollama · llamacpp
   memory/        shortterm (redis) · longterm (pgvector)
   events/        bus port + inproc · rabbitmq           ✅ Phase 5 (inproc)
@@ -451,6 +497,13 @@ graph here is fixed in code, so injection can change what one agent *concludes*
 but never what *runs* — and the harness still refuses to act on the conclusion
 unchecked.
 
+**[How does the harness actually decide?](docs/adr/0011-harness-engine.md)** —
+Five gates in a fixed order — registry, permission, policy, approval, execution —
+each cheaper and more certain than the next, each able to veto. Audit is not a
+gate but the spine: every path writes an entry, as a `defer` so a future early
+return cannot skip it. Deny-by-default everywhere, which means a tool added
+tomorrow is unusable until someone writes it a permission row and a policy row.
+
 **[Why a typed error taxonomy?](docs/adr/0007-error-taxonomy.md)** — An error
 leaving a repository has two audiences with opposite needs: the operator wants
 the driver message, the caller must never see it. `errs.Error` carries both and
@@ -469,8 +522,8 @@ in the log.
 | 3 | PostgreSQL layer, migrations, repository pattern | ✅ |
 | 4 | Authentication (JWT) and RBAC | ✅ |
 | 5 | Agent orchestration engine | ✅ |
-| 6 | Harness engine | ⏳ next |
-| 7 | Tool ecosystem | |
+| 6 | Harness engine | ✅ |
+| 7 | Tool ecosystem | ⏳ next |
 | 8 | Local LLM integration | |
 | 9 | Memory system | |
 | 10 | Infrastructure integration | |

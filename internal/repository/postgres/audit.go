@@ -335,3 +335,15 @@ func nullIDPtr(id *shared.ID) any {
 	}
 	return *id
 }
+
+// nullString converts an empty string to SQL NULL.
+//
+// Needed where a column is nullable with a uniqueness constraint: Postgres
+// treats NULLs as distinct, so a NULL idempotency key does not collide with
+// another NULL, whereas many rows carrying ” would.
+func nullString(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}

@@ -40,9 +40,12 @@ type Orchestrator struct {
 	agents    map[agent.Kind]Agent
 	incidents ports.IncidentRepository
 	tasks     ports.TaskRepository
-	bus       ports.EventBus
-	clock     shared.Clock
-	log       *slog.Logger
+	// calls persists an agent's intent before it is announced. Without it the
+	// harness receives an event naming a row that does not exist.
+	calls ports.ToolCallRepository
+	bus   ports.EventBus
+	clock shared.Clock
+	log   *slog.Logger
 
 	cfg OrchestratorConfig
 
@@ -89,6 +92,7 @@ type OrchestratorDeps struct {
 	Agents    map[agent.Kind]Agent
 	Incidents ports.IncidentRepository
 	Tasks     ports.TaskRepository
+	Calls     ports.ToolCallRepository
 	Bus       ports.EventBus
 	Clock     shared.Clock
 	Logger    *slog.Logger
@@ -117,7 +121,8 @@ func NewOrchestrator(d OrchestratorDeps) *Orchestrator {
 	}
 
 	return &Orchestrator{
-		agents: d.Agents, incidents: d.Incidents, tasks: d.Tasks, bus: d.Bus,
+		agents: d.Agents, incidents: d.Incidents, tasks: d.Tasks,
+		calls: d.Calls, bus: d.Bus,
 		clock: clock, log: log, cfg: cfg,
 		running: make(map[shared.ID]context.CancelFunc),
 	}
@@ -444,18 +449,44 @@ func (o *Orchestrator) safeExecute(ctx context.Context, impl Agent, in Input) (o
 	return impl.Execute(ctx, in)
 }
 
-// publishIntents emits each tool call as a tool.requested event.
+// publishIntents persists each tool call and emits it as a tool.requested event.
 //
 // This is the handoff, and the only thing the orchestrator does with an intent.
-// The harness subscribes to tool.requested and decides; if no harness is
-// listening yet, the events are simply unconsumed and nothing happens — which is
-// the correct behaviour for a system whose default is to do nothing.
+// The harness subscribes to tool.requested and decides.
+//
+// # Persist, then publish
+//
+// The row is written before the event that names it, for the same reason the
+// incident service commits before announcing: an event referencing a row that
+// does not exist is unprocessable, and the subscriber can only drop it.
+//
+// Getting this backwards is exactly the bug this ordering was written to fix.
+// Phase 5 published the event and never wrote the row — invisible at the time,
+// because nothing subscribed. The moment the harness did, every single intent
+// arrived as "tool.requested names a tool call that does not exist" and no
+// remediation was ever evaluated.
+//
+// A crash between the write and the publish leaves a `pending` row with no
+// event, which is recoverable by a sweep. The reverse leaves nothing to recover.
 func (o *Orchestrator) publishIntents(ctx context.Context, inc *incident.Incident, calls []*harness.ToolCallRequest) int {
 	published := 0
 	for _, call := range calls {
 		if call == nil {
 			continue
 		}
+
+		if o.calls != nil {
+			if err := o.calls.Create(ctx, call); err != nil {
+				// Do not publish an event whose row failed to write: the harness
+				// would only be able to drop it, and the agent's intent would be
+				// lost silently rather than loudly.
+				o.log.Error("could not persist a tool call; not publishing it",
+					"incident_id", inc.ID.String(), "call", call.Tool+"."+call.Action,
+					"agent", call.AgentName, "error", err)
+				continue
+			}
+		}
+
 		o.publish(ctx, inc, ports.TopicToolRequested, call.AgentName, map[string]any{
 			"tool_call_id": call.ID.String(),
 			"tool":         call.Tool,
