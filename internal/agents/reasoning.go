@@ -229,7 +229,11 @@ func defaultScript() map[string]ports.ReasoningResponse {
 			Content: `{"summary":"Restart the affected container to reclaim leaked memory. ` +
 				`This buys time; the leak still needs a code fix.",` +
 				`"tool":"docker","action":"restart_container",` +
-				`"params":{"container":"api-worker","graceful":true},` +
+				// "timeout_seconds", not "graceful": the catalog declares the former
+				// and the harness rejects an undeclared parameter rather than
+				// ignoring it. A scripted answer that the harness would refuse
+				// makes every test downstream of it assert the wrong thing.
+				`"params":{"container":"api-worker","timeout_seconds":30},` +
 				`"reason":"The worker pool has exhausted its memory limit and is being ` +
 				`OOM killed repeatedly. A restart reclaims the leaked allocations and ` +
 				`restores service while the underlying leak is fixed."}`,

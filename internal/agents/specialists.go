@@ -101,11 +101,41 @@ func (a *Monitoring) Execute(ctx context.Context, in Input) (Output, error) {
 }
 
 // gather builds the read-only intents this agent wants executed.
+//
+// The parameters are written against the declared schema in internal/tools, not
+// against a general notion of "context". The harness validates every call and
+// rejects an undeclared parameter rather than ignoring it — so passing a generic
+// {service, environment} to every tool, as an earlier version did, produced
+// seven denied_invalid_params refusals and no evidence at all.
+//
+// This package deliberately does not import internal/tools to read those
+// schemas: agents must not hold anything from the package that will, in Phase 7,
+// contain code that can act. The catalog is a contract these calls are written
+// against and the harness enforces, which is the same relationship the agents
+// have with the permission matrix.
 func (a *Monitoring) gather(in Input) ([]*harness.ToolCallRequest, error) {
-	specs := []struct{ tool, action, reason string }{
-		{"monitoring", "query", "read the service's error rate and latency around the incident window"},
-		{"docker", "list_containers", "identify which containers are running for the affected service"},
-		{"kubernetes", "get_pods", "check pod status and restart counts for the affected workload"},
+	specs := []struct {
+		tool, action, reason string
+		params               map[string]any
+	}{
+		{
+			"monitoring", "query",
+			"read the service's error rate and latency around the incident window",
+			map[string]any{"query": promQLFor(in.Incident.Service)},
+		},
+		{
+			"docker", "list_containers",
+			"identify which containers are running for the affected service",
+			map[string]any{"all": true},
+		},
+		{
+			"kubernetes", "get_pods",
+			"check pod status and restart counts for the affected workload",
+			map[string]any{
+				"namespace": namespaceFor(in.Incident.Environment),
+				"selector":  "app=" + in.Incident.Service,
+			},
+		},
 	}
 
 	out := make([]*harness.ToolCallRequest, 0, len(specs))
@@ -114,14 +144,39 @@ func (a *Monitoring) gather(in Input) ([]*harness.ToolCallRequest, error) {
 		if err != nil {
 			return nil, err
 		}
-		req.Params = map[string]any{
-			"service":     in.Incident.Service,
-			"environment": in.Incident.Environment,
-		}
+		req.Params = s.params
 		req.Confidence = 1.0 // reading telemetry is not a judgement call
 		out = append(out, req)
 	}
 	return out, nil
+}
+
+// promQLFor builds the query the Monitoring agent asks for.
+//
+// Hand-built rather than model-generated, deliberately: a PromQL expression
+// assembled by a language model is an unbounded string reaching a query engine,
+// and Phase 8 will have enough to worry about without that. When the model does
+// start proposing queries, the parameter schema is where the bound belongs.
+func promQLFor(service string) string {
+	if service == "" {
+		return `up`
+	}
+	return `rate(http_requests_total{job="` + service + `",status=~"5.."}[5m])`
+}
+
+// namespaceFor maps an incident's environment onto a cluster namespace.
+//
+// Falls back to "default" rather than to the raw environment string: the
+// parameter schema requires an RFC 1123 label, and an environment like
+// "Production (EU)" would be refused. A wrong-but-valid namespace returns no
+// pods, which reads as evidence; a refused call reads as a broken agent.
+func namespaceFor(environment string) string {
+	switch environment {
+	case "production", "staging", "development":
+		return environment
+	default:
+		return "default"
+	}
 }
 
 // -----------------------------------------------------------------------------
@@ -146,22 +201,37 @@ func NewLogAnalysis(d Deps) *LogAnalysis {
 func (a *LogAnalysis) Execute(ctx context.Context, in Input) (Output, error) {
 	const op = "agents.LogAnalysis.Execute"
 
+	// Bounded at 1000 lines: an unbounded log fetch is a memory hazard, and the
+	// executor would truncate it anyway. The schema caps it at 10000, so this
+	// stays well inside what the harness will accept.
+	const logLines = 1000
+
 	calls := make([]*harness.ToolCallRequest, 0, 2)
-	for _, s := range []struct{ tool, action, reason string }{
-		{"docker", "logs", "read container logs from the incident window"},
-		{"kubernetes", "logs", "read pod logs, including the previous container if it restarted"},
+	for _, s := range []struct {
+		tool, action, reason string
+		params               map[string]any
+	}{
+		{
+			"docker", "logs", "read container logs from the incident window",
+			map[string]any{"container": in.Incident.Service, "tail": logLines},
+		},
+		{
+			"kubernetes", "logs",
+			"read pod logs, including the previous container if it restarted",
+			map[string]any{
+				"pod": in.Incident.Service, "namespace": namespaceFor(in.Incident.Environment),
+				"tail": logLines,
+				// Where an OOMKill leaves its evidence: the current container
+				// started clean, so the useful logs belong to the one it replaced.
+				"previous": true,
+			},
+		},
 	} {
 		req, err := intent(a.clock, in, a.ID(), a.Name(), s.tool, s.action, s.reason)
 		if err != nil {
 			return Output{}, fmt.Errorf("%s: %w", op, err)
 		}
-		req.Params = map[string]any{
-			"service": in.Incident.Service,
-			// Bounded: an unbounded log fetch is a memory hazard and the
-			// executor would truncate it anyway.
-			"lines": 1000,
-			"since": in.Incident.DetectedAt.Format("2006-01-02T15:04:05Z07:00"),
-		}
+		req.Params = s.params
 		req.Confidence = 1.0
 		calls = append(calls, req)
 	}
@@ -217,12 +287,19 @@ func NewSecurity(d Deps) *Security {
 func (a *Security) Execute(ctx context.Context, in Input) (Output, error) {
 	const op = "agents.Security.Execute"
 
-	req, err := intent(a.clock, in, a.ID(), a.Name(), "security", "scan",
+	// "check_config", not "scan" — the catalog declares no action called scan,
+	// and the harness rejects an invented action as denied_unknown_tool. The
+	// distinction matters in the ledger: an unknown action reads as "the model
+	// made something up", which is not what happened here.
+	req, err := intent(a.clock, in, a.ID(), a.Name(), "security", "check_config",
 		"check the affected workload for known vulnerabilities and configuration drift")
 	if err != nil {
 		return Output{}, fmt.Errorf("%s: %w", op, err)
 	}
-	req.Params = map[string]any{"service": in.Incident.Service, "environment": in.Incident.Environment}
+	req.Params = map[string]any{
+		"target":    in.Incident.Service,
+		"namespace": namespaceFor(in.Incident.Environment),
+	}
 	req.Confidence = 1.0
 
 	resp, err := a.reasoner.Reason(ctx, ports.ReasoningRequest{

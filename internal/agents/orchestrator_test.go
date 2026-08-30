@@ -10,6 +10,7 @@ import (
 
 	"github.com/bishal05das/aegisops-ai/internal/agents"
 	domainagent "github.com/bishal05das/aegisops-ai/internal/domain/agent"
+	"github.com/bishal05das/aegisops-ai/internal/domain/harness"
 	"github.com/bishal05das/aegisops-ai/internal/domain/incident"
 	"github.com/bishal05das/aegisops-ai/internal/domain/shared"
 	"github.com/bishal05das/aegisops-ai/internal/events/inproc"
@@ -337,6 +338,134 @@ func TestFirstWaveRunsConcurrently(t *testing.T) {
 // -----------------------------------------------------------------------------
 // The security boundary
 // -----------------------------------------------------------------------------
+
+// Every published intent must name a tool call that actually exists.
+//
+// The regression test for a gap that was invisible for a whole phase: Phase 5
+// published tool.requested events and never wrote the tool_calls row, which
+// nothing noticed because nothing subscribed. When the Phase 6 harness did, every
+// intent arrived as "names a tool call that does not exist" and no remediation
+// was ever evaluated. An event referencing a row that does not exist is
+// unprocessable, and the subscriber can only drop it.
+func TestPublishedIntentsArePersistedFirst(t *testing.T) {
+	t.Parallel()
+
+	calls := newMemToolCalls()
+	f := newFixture(t, func(d *agents.OrchestratorDeps) { d.Calls = calls })
+	ctx := testCtx(t)
+
+	var (
+		mu        sync.Mutex
+		announced []string
+	)
+	if _, err := f.bus.Subscribe(ctx, ports.TopicToolRequested, func(_ context.Context, e ports.Event) error {
+		id, _ := e.Payload["tool_call_id"].(string)
+		mu.Lock()
+		announced = append(announced, id)
+		mu.Unlock()
+		return nil
+	}); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
+	if err := f.orch.Investigate(ctx, f.inc.ID); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(announced) == 0 {
+		t.Fatal("no intents were announced")
+	}
+	for _, id := range announced {
+		parsed, err := shared.ParseID(id)
+		if err != nil {
+			t.Errorf("tool_call_id %q is not a usable id", id)
+			continue
+		}
+		if !calls.has(parsed) {
+			t.Errorf("tool.requested announced %s, which was never persisted", id)
+		}
+	}
+	t.Logf("%d intents announced, all backed by a persisted row", len(announced))
+}
+
+// A tool call that cannot be persisted must not be announced: the harness could
+// only drop the event, losing the agent's intent silently rather than loudly.
+func TestAnUnpersistableIntentIsNotAnnounced(t *testing.T) {
+	t.Parallel()
+
+	calls := newMemToolCalls()
+	calls.failing = true
+	f := newFixture(t, func(d *agents.OrchestratorDeps) { d.Calls = calls })
+	ctx := testCtx(t)
+
+	var count int
+	var mu sync.Mutex
+	if _, err := f.bus.Subscribe(ctx, ports.TopicToolRequested, func(context.Context, ports.Event) error {
+		mu.Lock()
+		count++
+		mu.Unlock()
+		return nil
+	}); err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
+	if err := f.orch.Investigate(ctx, f.inc.ID); err != nil {
+		t.Fatalf("Investigate: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if count != 0 {
+		t.Errorf("%d intents were announced despite every write failing", count)
+	}
+}
+
+// memToolCalls records what the orchestrator persisted.
+type memToolCalls struct {
+	mu      sync.Mutex
+	stored  map[shared.ID]bool
+	failing bool
+}
+
+func newMemToolCalls() *memToolCalls {
+	return &memToolCalls{stored: map[shared.ID]bool{}}
+}
+
+func (m *memToolCalls) Create(_ context.Context, r *harness.ToolCallRequest) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failing {
+		return errors.New("the database is unavailable")
+	}
+	m.stored[r.ID] = true
+	return nil
+}
+
+func (m *memToolCalls) has(id shared.ID) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.stored[id]
+}
+
+func (m *memToolCalls) Get(context.Context, shared.ID) (*harness.ToolCallRequest, error) {
+	return nil, shared.ErrNotFound
+}
+func (m *memToolCalls) GetByIdempotencyKey(context.Context, string) (*harness.ToolCallRequest, error) {
+	return nil, shared.ErrNotFound
+}
+func (m *memToolCalls) Update(context.Context, *harness.ToolCallRequest) error { return nil }
+func (m *memToolCalls) List(context.Context, ports.ToolCallFilter, ports.Page) (ports.PageResult[*harness.ToolCallRequest], error) {
+	return ports.PageResult[*harness.ToolCallRequest]{}, nil
+}
+func (m *memToolCalls) SaveExecution(context.Context, *harness.Execution) error { return nil }
+func (m *memToolCalls) GetExecution(context.Context, shared.ID) (*harness.Execution, error) {
+	return nil, shared.ErrNotFound
+}
 
 // The claim ADR 0006 makes, asserted as a property of the code: an agent's most
 // powerful output is a description of an action. The orchestrator publishes it
