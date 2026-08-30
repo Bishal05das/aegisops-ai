@@ -136,9 +136,16 @@ type ToolInvocation struct {
 }
 
 // ToolResult is what a tool reports back.
+//
+// Stdout, Stderr and ExitCode are captured into the execution record today.
+// Output and Changed are the Phase 7 contract and are **not yet persisted** —
+// the executions table has no structured-output column, and adding one belongs
+// with the phase that produces real output to put in it. They are declared here
+// for the same reason the tool descriptors are declared before their
+// implementations: so the shape is agreed before anything depends on it.
 type ToolResult struct {
-	// Output is the machine-readable result, merged into the execution record
-	// and made available to later agents as evidence.
+	// Output is the machine-readable result. Phase 7 carries it into the
+	// execution record and makes it available to later agents as evidence.
 	Output map[string]any
 
 	Stdout   string

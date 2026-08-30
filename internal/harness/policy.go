@@ -97,7 +97,6 @@ func (e *PolicyEngine) AutoAllowed() bool { return e.allowAuto }
 // Policies is a compiled, immutable policy set.
 type Policies struct {
 	ordered []*harness.Policy
-	builtAt time.Time
 }
 
 // CompilePolicies orders policies so the first match is the one that governs.
@@ -106,7 +105,7 @@ type Policies struct {
 // wildcard regardless of the priority numbers someone chose. Priority only
 // breaks ties between equally specific rules — otherwise a high priority on a
 // broad rule could silently override a narrow one written later.
-func CompilePolicies(policies []*harness.Policy, at time.Time) *Policies {
+func CompilePolicies(policies []*harness.Policy) *Policies {
 	ordered := make([]*harness.Policy, 0, len(policies))
 	ordered = append(ordered, policies...)
 
@@ -122,7 +121,7 @@ func CompilePolicies(policies []*harness.Policy, at time.Time) *Policies {
 		// first.
 		return ordered[i].Risk.Rank() > ordered[j].Risk.Rank()
 	})
-	return &Policies{ordered: ordered, builtAt: at}
+	return &Policies{ordered: ordered}
 }
 
 // For returns the policy governing a tool.action, or nil when none matches.
@@ -141,12 +140,6 @@ func (p *Policies) All() []*harness.Policy {
 	copy(out, p.ordered)
 	return out
 }
-
-// Count reports how many policies are compiled.
-func (p *Policies) Count() int { return len(p.ordered) }
-
-// BuiltAt reports when the set was compiled.
-func (p *Policies) BuiltAt() time.Time { return p.builtAt }
 
 // Ruling is the policy engine's verdict.
 type Ruling struct {
@@ -305,7 +298,7 @@ func (e *PolicyEngine) policies(ctx context.Context) (*Policies, error) {
 		return nil, fmt.Errorf("load policies: %w", err)
 	}
 
-	compiled := CompilePolicies(rules, e.clock.Now())
+	compiled := CompilePolicies(rules)
 	e.current.Store(compiled)
 	e.loadedA.Store(e.clock.Now().UnixNano())
 	return compiled, nil

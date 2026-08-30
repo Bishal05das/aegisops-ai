@@ -78,14 +78,13 @@ type Permissions struct {
 	// byAgent indexes rules by agent kind, so a lookup scans only that agent's
 	// rules rather than the whole matrix.
 	byAgent map[string][]*harness.Permission
-	builtAt time.Time
 }
 
 // CompilePermissions sorts rules into the order the engine resolves them.
 //
 // Sorting happens once here rather than on every lookup: the resolution order is
 // a property of the rule set, not of the query.
-func CompilePermissions(rules []*harness.Permission, at time.Time) *Permissions {
+func CompilePermissions(rules []*harness.Permission) *Permissions {
 	byAgent := make(map[string][]*harness.Permission)
 	for _, r := range rules {
 		byAgent[r.AgentKind] = append(byAgent[r.AgentKind], r)
@@ -99,7 +98,7 @@ func CompilePermissions(rules []*harness.Permission, at time.Time) *Permissions 
 			return rs[i].Effect == harness.EffectDeny && rs[j].Effect != harness.EffectDeny
 		})
 	}
-	return &Permissions{byAgent: byAgent, builtAt: at}
+	return &Permissions{byAgent: byAgent}
 }
 
 // Allows resolves the matrix for one agent and action.
@@ -123,18 +122,6 @@ func (p *Permissions) Rules(agentKind string) []*harness.Permission {
 	copy(out, p.byAgent[agentKind])
 	return out
 }
-
-// Count reports the total number of compiled rules.
-func (p *Permissions) Count() int {
-	n := 0
-	for _, rs := range p.byAgent {
-		n += len(rs)
-	}
-	return n
-}
-
-// BuiltAt reports when the matrix was compiled.
-func (p *Permissions) BuiltAt() time.Time { return p.builtAt }
 
 // Check evaluates one request against the matrix.
 func (e *PermissionEngine) Check(ctx context.Context, agentKind, tool, action string) (Verdict, error) {
@@ -222,7 +209,7 @@ func (e *PermissionEngine) matrix(ctx context.Context) (*Permissions, error) {
 		return nil, fmt.Errorf("load the permission matrix: %w", err)
 	}
 
-	compiled := CompilePermissions(rules, e.clock.Now())
+	compiled := CompilePermissions(rules)
 	e.current.Store(compiled)
 	e.loadedA.Store(e.clock.Now().UnixNano())
 	return compiled, nil

@@ -32,7 +32,6 @@ type Harness struct {
 	audit     ports.AuditRepository
 	incidents ports.IncidentRepository
 	agents    ports.AgentRepository
-	tx        ports.TxManager
 	bus       ports.EventBus
 
 	clock shared.Clock
@@ -51,7 +50,6 @@ type Deps struct {
 	Audit     ports.AuditRepository
 	Incidents ports.IncidentRepository
 	Agents    ports.AgentRepository
-	Tx        ports.TxManager
 	Bus       ports.EventBus
 
 	Clock  shared.Clock
@@ -72,7 +70,7 @@ func New(d Deps) *Harness {
 		registry: d.Registry, permission: d.Permission, policy: d.Policy,
 		approval: d.Approval, executor: d.Executor,
 		calls: d.Calls, audit: d.Audit, incidents: d.Incidents, agents: d.Agents,
-		tx: d.Tx, bus: d.Bus, clock: clock, log: log,
+		bus: d.Bus, clock: clock, log: log,
 	}
 }
 

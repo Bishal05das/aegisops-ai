@@ -280,7 +280,7 @@ func run(args []string) int {
 		Registry: toolRegistry, Permission: permissionEngine, Policy: policyEngine,
 		Approval: approvalGate, Executor: executor,
 		Calls: toolCallRepo, Audit: audit, Incidents: incidentRepo, Agents: agentRepo,
-		Tx: txm, Bus: bus, Clock: clock, Logger: log,
+		Bus: bus, Clock: clock, Logger: log,
 	})
 	if err := theHarness.Start(ctx); err != nil {
 		log.Error("could not start the harness", "error", err)

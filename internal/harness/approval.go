@@ -65,7 +65,6 @@ const (
 	ErrApprovalExpired     = "expired"
 	ErrApprovalAuthority   = "insufficient_authority"
 	ErrApprovalForbidden   = "forbidden_action"
-	ErrApprovalSelfApprove = "self_approval"
 	ErrApprovalStalePolicy = "policy_changed"
 )
 
